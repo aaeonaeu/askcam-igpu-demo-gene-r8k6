@@ -42,3 +42,20 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+
+  cams:
+    image: ${MEDIAMTX_IMAGE:-bluenviron/mediamtx:1.21.3-ffmpeg}
+    container_name: askcam-cams
+    restart: unless-stopped
+    volumes:
+      - ./cams/mediamtx.yml:/mediamtx.yml:ro
+      - ./media:/media:ro
+    ports:
+      - "${RTSP_PORT:-8554}:8554"
+    healthcheck:
+      # all three streams must exist and have a publisher
+      test: ["CMD-SHELL", "for c in cam1 cam2 cam3; do ffprobe -v error -rtsp_transport tcp -timeout 5000000 -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 rtsp://127.0.0.1:8554/$$c | grep -q h264 || exit 1; done"]
+      interval: 15s
+      timeout: 20s
+      retries: 6
+      start_period: 20s

@@ -79,6 +79,8 @@ Start from the proven working setup in ~/frigate-test (compose.yml, config/confi
 - Image ghcr.io/blakeblackshear/frigate:stable-rocm (0.18.2) with devices /dev/kfd and /dev/dri, group_add 44 and 990, LIBVA_DRIVER_NAME=radeonsi, NO HSA_OVERRIDE_GFX_VERSION (gfx1103 works natively).
 - Detector: `detectors: onnx: {type: onnx}` with model_type yolo-generic, 320x320, nchw, float, labelmap /labelmap/coco-80.txt. Measured 8-12 ms/inference. First start compiles MIGraphX for ~82 s; persist /config/model_cache so it's cached.
 - hwaccel_args: preset-vaapi (decode on the VCN engine).
+- Camera clips from step 2 (rtsp://cams:8554/cam1..3, 15 fps, 1080p). With default motion settings Frigate stays in "calibrating" on busy scenes (needs <5% motion and <=4 motion boxes) and never detects: cam1 and cam2 got 0 detections. Per-camera `motion: {threshold: 50, contour_area: 80, improve_contrast: false}` fixed it (tune further if needed). With that, 3 cameras generate ~35 detections/s each, saturate the single detector (~9.5 ms) and skip 5-7 fps per camera: reduce detect fps (~5), use min_area/masks, try YOLO11n or a second detector instance, until skipped_fps is ~0.
+- Events/review items need zones and `review`/`objects` settings: the throwaway config produced 0 events.
 - `detect.enabled: true` must be set explicitly. Don't mount anything read-only at /media (Frigate writes /media/frigate).
 To do:
 - Copy the ONNX model into the askcam tree (or export it with ~/rocm-test/venv: `YOLO('yolo11s.pt').export(format='onnx', imgsz=320, opset=17, simplify=True)` with TMPDIR on disk).

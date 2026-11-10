@@ -41,3 +41,38 @@ Host: AAEON GENE-R8K6, Ryzen 5 PRO 8640U, Radeon 760M (gfx1103), 2x8 GB DDR5-480
 **Open for later steps**
 - Gemma-3-4B alternative not benchmarked (`scripts/fetch-models.sh gemma`, then set the two `VLM_*_FILE` lines in `.env`).
 - Behaviour with Frigate's detector running at the same time is measured in step 4.
+
+## Step 2: simulated RTSP cameras (done 2026-11-10)
+
+**What exists**
+- Service `cams` in `compose.yml`: `bluenviron/mediamtx:1.21.3-ffmpeg` (pinned; digest sha256:208e9f17...). `cams/mediamtx.yml` defines paths `cam1`..`cam3`; each path runs `ffmpeg -re -stream_loop -1 -i /media/camN.mp4 -c copy -f rtsp ...` via `runOnInit` with `runOnInitRestart: yes`. No transcoding in the loop. RTSP on `rtsp://<host>:8554/cam1|cam2|cam3` (from other containers: `rtsp://cams:8554/camN`). Only RTSP is enabled.
+- Healthcheck: ffprobe must read H.264 from all three paths. `restart: unless-stopped`.
+- `scripts/fetch-media.sh` downloads the originals from Wikimedia Commons into `media/src/` (backs off on HTTP 429) and encodes `media/cam1..3.mp4` with the ffmpeg inside the mediamtx image (no host ffmpeg needed): H.264 High, 1920x1080, 15 fps, GOP 30 (keyframe every 2 s), no audio. Sources, authors and licenses: `media/SOURCES.md`. Media files are git-ignored.
+
+**Clips**
+| cam | scene | source | length | encoded size |
+|---|---|---|---|---|
+| cam1 | street crossing with shops, people and cars (CC0) | DiagonalCrosswalkYongeDundas | 56.6 s | 41 MB |
+| cam2 | warehouse, overhead, hi-vis vests (public domain, USDA) | 20200716-OSEC-LSC-1159-CLIP-B-HighRes | 23.8 s | 13 MB |
+| cam3 | rural road junction, cars and vans (CC0) | Gau-Bischofsheim L 415 | 61.3 s | 23 MB |
+
+Chosen after rejecting: a tornado security camera (Fort Pierce), a talking-head safety video, handheld Mazatlan footage, and many CCTV clips of crimes (not suitable for a booth).
+
+**Verified**
+- `ffprobe rtsp://localhost:8554/cam1..3`: h264 High 1920x1080 15 fps on all three.
+- All three read concurrently for 65 s with `-c copy`: 956-961 frames each (15 fps), no errors. cam2 (23.8 s) looped almost 3 times without timestamp problems. Keyframes every 2.0 s.
+- Container load while serving 3 readers: ~7% of one core, 64 MiB RAM.
+- Killing one publisher ffmpeg: it restarts by itself within seconds; `docker compose restart cams` returns to healthy.
+- Loop points show a visible jump (clips are short). Expected.
+
+**Frigate check (using the earlier ~/frigate-test stack with these exact mp4 files and the cached ROCm detector)**
+- With default motion settings only cam3 got detections (70-80/s). **cam1 and cam2 got 0**: Frigate's motion detector stays in "calibrating" until motion is <5% of the frame AND there are at most 4 motion boxes. Busy scenes (crowd, many workers) never satisfy that, so no detection runs at all.
+- Fix that worked: per-camera `motion: {threshold: 50, contour_area: 80, improve_contrast: false}` on cam1 and cam2. Then all three cameras detect (people, cars, vans correct, hi-vis workers detected).
+- New issue for step 3/4: with that tuning the three cameras produce ~35 detections/s each (~105/s total, one detector at ~9.5 ms is saturated) and **5-7 frames/s per camera are skipped**. Needs tuning in step 3 (lower `detect.fps` to ~5, larger `min_area`/motion mask, YOLO11n, or a second detector instance).
+- No events were created yet in this throwaway config: that needs zones/review settings (step 3).
+
+**Gotchas**
+- `docker exec ... pkill -f cam2.mp4` kills the shell running it (the pattern matches its own command line). Use `ps` + `kill <pid>`.
+- ffprobe prints "co located POCs unavailable" when it joins a stream mid-GOP. Harmless.
+- Wikimedia returns HTTP 429 to rapid or anonymous requests; the script sleeps between files and retries.
+- cam2 shows identifiable workers. It is public domain, but check it is acceptable for the audience (noted in SOURCES.md).

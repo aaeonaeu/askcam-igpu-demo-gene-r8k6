@@ -1,0 +1,23 @@
+# Simulated cameras: each path loops a local clip and publishes it as RTSP,
+# without re-encoding (-c copy). The clips are keyframed every 2 s.
+logLevel: info
+rtsp: yes
+rtspAddress: :8554
+# plain TCP+UDP RTSP is enough on the compose network
+webrtc: no
+hls: no
+srt: no
+rtmp: no
+api: no
+metrics: no
+
+paths:
+  cam1:
+    runOnInit: ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i /media/cam1.mp4 -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:$RTSP_PORT/$MTX_PATH
+    runOnInitRestart: yes
+  cam2:
+    runOnInit: ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i /media/cam2.mp4 -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:$RTSP_PORT/$MTX_PATH
+    runOnInitRestart: yes
+  cam3:
+    runOnInit: ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i /media/cam3.mp4 -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:$RTSP_PORT/$MTX_PATH
+    runOnInitRestart: yes
