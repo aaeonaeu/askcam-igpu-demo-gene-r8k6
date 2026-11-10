@@ -36,7 +36,7 @@ First start: Frigate compiles the detection model for the GPU (MIGraphX, about 1
 | URL | What |
 |---|---|
 | http://HOST:8000 | **the demo page** (add `#cam2` to open a camera directly) |
-| https://HOST:8971 | Frigate's own UI (self-signed certificate, first-run credentials are printed in `docker logs askcam-frigate`) |
+| https://HOST:8971 | Frigate's own UI (self-signed certificate; authentication is disabled in this demo config) |
 | rtsp://HOST:8554/cam1 | the simulated cameras |
 | http://HOST:8080 | llama.cpp router API (`/models`, `/v1/chat/completions`) |
 
