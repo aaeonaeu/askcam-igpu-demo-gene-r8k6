@@ -77,6 +77,11 @@ services:
       cams:
         condition: service_healthy
     shm_size: 512mb
+    # frigate.embeddings_manager (GenAI descriptions) grows ~5 GiB/h in this setup (see NOTES.md). Without a limit the
+    # kernel OOM killer picks victims host-wide (it has killed llama-server); with it only Frigate's own process dies and
+    # Frigate's watchdog restarts it within seconds. No swap for it: swapping makes everything on the box crawl.
+    mem_limit: 5g
+    memswap_limit: 5g
     devices:
       - /dev/kfd
       - /dev/dri

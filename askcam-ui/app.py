@@ -390,6 +390,29 @@ async def models_load(body: Load):
     return {"ok": True}
 
 
+@app.get("/llm/v1/models")
+async def llm_models():
+    """Frigate validates that its configured model name ("vlm") is in /v1/models when its llama.cpp provider starts
+    (and restarts after any crash of its embeddings process). Present the loaded model under that name."""
+    lst = (await http.get(f"{VLM}/v1/models", timeout=5.0)).json().get("data", [])
+    act = active_model()
+    entry = (next((m for m in lst if m["id"] == act), None)
+             or next((m for m in lst if m.get("status", {}).get("value") == "loaded"), None)
+             or (lst[0] if lst else None))
+    if entry is None:
+        return JSONResponse({"error": "no models"}, status_code=503)
+    return {"object": "list", "data": [{**entry, "id": "vlm", "aliases": []}]}
+
+
+@app.get("/llm/props")
+async def llm_props():
+    act = active_model()
+    if not act:
+        return JSONResponse({"error": "no model loaded"}, status_code=503)
+    r = await http.get(f"{VLM}/props", params={"model": act}, timeout=5.0)
+    return Response(r.content, status_code=r.status_code, media_type="application/json")
+
+
 @app.post("/llm/v1/chat/completions")
 async def llm_proxy(request: Request):
     """Frigate GenAI (via vlm-gate) calls this with its fixed model name; forward to whichever model is loaded."""

@@ -243,3 +243,31 @@ First measurements (same cameras, GenAI running, 9 and 6 questions):
 | qwen2.5-vl-3b-lite (256 image tokens) | 3.17 GiB | **1.8 s** | 24.6 tok/s | 4.0 s |
 
 So halving the image tokens cuts first word by ~1.4 s at no memory cost; what it costs in answer detail has not been judged systematically. Detector time and skipped frames stayed in the normal range for both.
+
+### Step 5c: Gemma-3-4B and Qwen2.5-VL-7B compared with the 3B (measured 2026-11-10)
+
+Setup: all 3 cameras, detection (2 detectors) and Frigate GenAI running, 9 questions per model through the UI (`scripts/ui-test.py 3`), plus 12 identical (frame, question) pairs per model (`scripts/model-compare.py`, answers in `logs/compare/`, frames fixed so every model sees the same images). Switch with `scripts/switch-model.sh <preset>`.
+
+| Model | GPU memory | First word | Speed | Image + prompt (same frames) | Detector avg | Skipped frames | Switch time |
+|---|---|---|---|---|---|---|---|
+| qwen2.5-vl-3b-lite (256 img tok) | 3.2 GiB | **1.8 s** | 24.6 tok/s | 2.1 s | 8.5 ms | 0.02/s | 4 s |
+| qwen2.5-vl-3b (default, 512 img tok) | 3.2 GiB | 3.2 s | 23.2 tok/s | 3.5 s | 9.6 ms | 0.07-0.11/s | 5.5 s |
+| gemma-3-4b | 4.4 GiB | 6.5 s | 11.3 tok/s (9.6 on same frames) | 6.3 s | 25-28 ms | 0.7-1.1/s | 6-7 s |
+| qwen2.5-vl-7b (ctx 4096, 1 slot) | 5.7 GiB | 7.4 s | 12.4 tok/s | 5.1 s | 25-32 ms | 2.2-3.0/s | 10 s |
+
+Both bigger models **fit and run** (no OOM, no GPU reset), but they cost detection: skipped frames reach 2-3/s of ~12 fps with the 7B (about 20%), and the detector slows from ~9 ms to ~25-30 ms while a question or description is being processed. The 7B also runs with one slot, so Frigate descriptions and UI questions queue behind each other. The GPU sits at 90-97% busy.
+
+Quality on the 12 identical pairs, judged against the frames (I looked at them):
+- **Safety gear on cam2** (everyone wears a vest): 7B correct ("no one is without"); 3B and 3B-lite wrong ("Yes, at least one person"); Gemma hedged ("cannot determine").
+- **Vehicle counts** (cam1 about 6-7 cars, cam3 about 7 incl. distant ones): 3B 5 and 3; lite 10 and 3; 7B "at least 10" and "at least 5"; Gemma "several", never a number. No model counts reliably.
+- **Hallucinations:** Gemma invented "candies" and "pedestrians without helmets"; lite called the workers "volunteers" and said "no unusual" with less detail; the 7B was the most careful ("no one visible, so impossible to determine"). 
+- **Style:** the 7B and 3B give concise answers; Gemma is wordier and hedges.
+Overall: 7B is clearly the most accurate, 3B is the best speed/quality compromise, lite trades detail for ~1.4 s, Gemma is slower than the 3B and not better on this task. Sample is small (12 answers), so treat it as indicative.
+
+Recommendation for the booth: keep **qwen2.5-vl-3b** as the default; use the **7B** only for a "better answers" moment with Frigate descriptions paused or the demo at fewer cameras, accepting ~7 s to first word.
+
+### Memory findings made while doing this (important for step 6)
+- **`frigate.embeddings_manager` grows about 5 GiB per hour** (RSS +0.09 GiB/min, linear, also with no GenAI calls in progress) and was OOM-killed three times (15:11 and 16:10 today, and an earlier host-wide OOM at 14:21 killed `llama-server` itself). Its job here is running the GenAI description processor. Root cause not found (Frigate 0.18.2; `FRIGATE_MEMRAY_MODULES=frigate.embeddings` would profile it). Swap was full (4/4 GiB) when it happened, which also explains erratic tok/s in the first Gemma run.
+- **Mitigation applied:** Frigate now has `mem_limit: 5g` and `memswap_limit: 5g` in `compose.yml`. A leaking process now dies inside Frigate's cgroup and Frigate's watchdog restarts it (a few seconds without descriptions) instead of the kernel killing the VLM. Not yet verified over a full cycle: step 6's soak must log this process's RSS and the number of restarts.
+- **Restart bug fixed:** when that process restarts, Frigate's llama.cpp provider re-validates the model name `vlm` against `/v1/models`; the router does not list `vlm`, so descriptions silently stopped ("llama.cpp provider has not been initialized"). `vlm-gate` now serves `/v1/models` and `/props` through askcam-ui under the name `vlm`; verified by restarting Frigate (log: "llama.cpp model 'vlm' initialized").
+- RAM is the tightest resource on this 14.4 GiB machine (GPU memory is carved from it): with the 3B about 9.8 GiB used / 4.9 GiB available after Frigate restart; with Gemma or the 7B it dropped to 1.3-2.7 GiB available and swap was used.

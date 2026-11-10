@@ -25,6 +25,9 @@ server {
         limit_req_status 503;
         proxy_pass http://askcam-ui:8000/llm/v1/chat/completions;
     }
+    # Frigate checks these when its llama.cpp provider starts: answered by askcam-ui under the name "vlm"
+    location = /v1/models { proxy_pass http://askcam-ui:8000/llm/v1/models; }
+    location = /props { proxy_pass http://askcam-ui:8000/llm/props; }
     # model info / props / health: pass through unlimited
     location / {
         proxy_pass http://vlm:8080;
