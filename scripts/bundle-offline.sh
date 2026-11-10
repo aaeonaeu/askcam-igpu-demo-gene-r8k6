@@ -19,7 +19,9 @@ mkdir -p "$W/payload/models" "$W/payload/media" "$W/payload/frigate-config"
 if [ $ALL = 1 ]; then cp -v models/*.gguf "$W/payload/models/"
 else cp -v models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf models/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf "$W/payload/models/"; fi
 cp -v media/*.mp4 "$W/payload/media/"
-cp -rv frigate/config/model_cache "$W/payload/frigate-config/"
+# the cache is written by root inside the Frigate container: copy it with a throw-away container (no sudo needed)
+docker run --rm -v "$PWD/frigate/config/model_cache:/src:ro" -v "$W/payload/frigate-config:/dst" \
+  --entrypoint sh "${NGINX_IMAGE:-nginx:1.29-alpine}" -c "cp -a /src /dst/model_cache && chown -R $(id -u):$(id -g) /dst"
 cp .env "$W/payload/env.used"   # reference only: GIDs of the build host
 echo "== tar"; tar -C "$W" -cf "$OUT" askcam images.tar payload
 sha256sum "$OUT" | tee "$OUT.sha256"; ls -lh "$OUT"
