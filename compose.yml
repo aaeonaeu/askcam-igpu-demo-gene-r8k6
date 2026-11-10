@@ -2,7 +2,7 @@ name: askcam
 
 services:
   vlm:
-    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan}
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:15fd15e1f1d2ab2daf4b0b88f5849d95764c155237f36e8f5d36b32a4cec1be9}
     container_name: askcam-vlm
     restart: unless-stopped
     devices:
@@ -35,7 +35,7 @@ services:
       start_period: 60s
 
   cams:
-    image: ${MEDIAMTX_IMAGE:-bluenviron/mediamtx:1.21.3-ffmpeg}
+    image: ${MEDIAMTX_IMAGE:-bluenviron/mediamtx:1.21.3-ffmpeg@sha256:208e9f1740a09a5ee63b6308e77ce0d54fce0456462f640e6bd9acfc62ebb5a2}
     container_name: askcam-cams
     restart: unless-stopped
     volumes:
@@ -52,7 +52,7 @@ services:
       start_period: 20s
 
   vlm-gate:
-    image: ${NGINX_IMAGE:-nginx:1.29-alpine}
+    image: ${NGINX_IMAGE:-nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de}
     container_name: askcam-vlm-gate
     restart: unless-stopped
     depends_on:
@@ -70,7 +70,7 @@ services:
       retries: 5
 
   frigate:
-    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2-rocm}
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2-rocm@sha256:d659f0967627e7bd0b29c96bc396e436ce041aa40bf19e213f02bdade6092a83}
     container_name: askcam-frigate
     restart: unless-stopped
     depends_on:
