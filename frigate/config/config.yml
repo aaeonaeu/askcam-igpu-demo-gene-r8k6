@@ -1,0 +1,142 @@
+# Frigate 0.18 (stable-rocm): decode on the iGPU video engine (VA-API),
+# detection on the iGPU via ONNX Runtime + MIGraphX (ROCm), tracking/rules on the CPU.
+mqtt:
+  enabled: false
+
+# Auth is off for a closed booth/lab network. Turn it on (and drop the 5000 port mapping)
+# before exposing this beyond a trusted LAN.
+auth:
+  enabled: false
+
+ui:
+  timezone: Europe/Rome
+  time_format: 24hour
+
+logger:
+  default: info
+
+birdseye:
+  enabled: false
+
+# Two detector processes: with one, the Python side of a single detector (about 90% of a core at
+# ~100 inferences/s) became the bottleneck and 5 frames/s were skipped across the 3 cameras.
+# Each instance compiles/loads the model on the iGPU (about 0.2 GiB GPU memory each).
+detectors:
+  onnx0:
+    type: onnx
+  onnx1:
+    type: onnx
+
+model:
+  model_type: yolo-generic
+  width: 320
+  height: 320
+  input_tensor: nchw
+  input_dtype: float
+  # yolo11n: ~7 ms vs ~12 ms for yolo11s on the iGPU and leaves GPU headroom for the VLM.
+  # For better accuracy export yolo11s (scripts/export-yolo.sh s) and point this at yolo11s-320.onnx.
+  path: /config/model_cache/yolo11n-320.onnx
+  # Standard COCO-80 names (Frigate's built-in labelmap folds bus and truck into "car")
+  labelmap_path: /config/labelmap-coco80.txt
+
+ffmpeg:
+  hwaccel_args: preset-vaapi
+
+detect:
+  enabled: true
+  width: 1280
+  height: 720
+  fps: 5
+
+objects:
+  track: [person, car, bus, truck, bicycle, motorcycle]
+
+# Short retention. The looping demo clips keep every camera in "alert" state all the time, which
+# produced ~2.5 GB of recordings per 13 minutes at the first attempt, so only alerts are kept and
+# only for about an hour (days accepts fractions). expire_interval is in minutes.
+record:
+  enabled: true
+  expire_interval: 5
+  continuous:
+    days: 0
+  motion:
+    days: 0
+  alerts:
+    pre_capture: 3
+    post_capture: 3
+    retain:
+      days: 0.05
+  detections:
+    pre_capture: 3
+    post_capture: 3
+    retain:
+      days: 0
+
+snapshots:
+  enabled: true
+  bounding_box: true
+  timestamp: false
+  height: 480
+  quality: 70
+  retain:
+    default: 0.05
+
+cameras:
+  cam1:
+    friendly_name: Street crossing
+    ffmpeg:
+      inputs:
+        - path: rtsp://cams:8554/cam1
+          roles: [detect, record]
+    # Busy scenes keep Frigate's motion detector "calibrating" (needs <5% motion and <=4 boxes),
+    # which disables detection entirely. These values avoid that.
+    motion:
+      threshold: 50
+      contour_area: 80
+      improve_contrast: false
+    zones:
+      crosswalk:
+        friendly_name: Crosswalk
+        coordinates: 0.00,0.60,0.55,0.56,1.0,0.68,1.0,1.0,0.00,1.0
+        objects: [person, bicycle, motorcycle, car, bus, truck]
+    review:
+      alerts:
+        labels: [person, bicycle, motorcycle, car, bus, truck]
+        required_zones: [crosswalk]
+
+  cam2:
+    friendly_name: Warehouse floor
+    ffmpeg:
+      inputs:
+        - path: rtsp://cams:8554/cam2
+          roles: [detect, record]
+    motion:
+      threshold: 50
+      contour_area: 80
+      improve_contrast: false
+    zones:
+      packing_line:
+        friendly_name: Packing line
+        coordinates: 0.05,0.55,0.50,0.05,0.95,0.05,0.95,0.50,0.55,1.0,0.05,1.0
+        objects: [person]
+    review:
+      alerts:
+        labels: [person]
+        required_zones: [packing_line]
+
+  cam3:
+    friendly_name: Road junction
+    ffmpeg:
+      inputs:
+        - path: rtsp://cams:8554/cam3
+          roles: [detect, record]
+    zones:
+      junction:
+        friendly_name: Junction
+        coordinates: 0.00,0.33,1.0,0.33,1.0,0.75,0.00,0.75
+        objects: [car, bus, truck, motorcycle, bicycle, person]
+    review:
+      alerts:
+        labels: [car, bus, truck, motorcycle, bicycle, person]
+        required_zones: [junction]
+version: 0.18-0

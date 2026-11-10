@@ -76,3 +76,58 @@ Chosen after rejecting: a tornado security camera (Fort Pierce), a talking-head 
 - ffprobe prints "co located POCs unavailable" when it joins a stream mid-GOP. Harmless.
 - Wikimedia returns HTTP 429 to rapid or anonymous requests; the script sleeps between files and retries.
 - cam2 shows identifiable workers. It is public domain, but check it is acceptable for the audience (noted in SOURCES.md).
+
+## Step 3: Frigate on the iGPU (done 2026-11-10, with one open stability issue)
+
+**What exists**
+- Service `frigate` in `compose.yml`: `ghcr.io/blakeblackshear/frigate:0.18.2-rocm` (pinned via `FRIGATE_IMAGE`), `/dev/kfd` + `/dev/dri`, video/render groups, `LIBVA_DRIVER_NAME=radeonsi`, **no** `HSA_OVERRIDE_GFX_VERSION`, shm 512 MB, `/tmp/cache` tmpfs 1 GB, `depends_on: cams (healthy)`. UI on `:8971` (auth disabled), unauthenticated API on `127.0.0.1:5000` only.
+- `frigate/config/config.yml` (tracked) and `frigate/config/labelmap-coco80.txt` (tracked). Everything else in `frigate/config/` (db, secrets, `model_cache/`) and `frigate/media/` is git-ignored.
+- `scripts/export-yolo.sh [s n ...]` (IMGSZ=320 default) builds `frigate/config/model_cache/yolo11<size>-320.onnx` inside a throwaway `python:3.12-slim` container, nothing needed on the host. Takes about 1-2 min.
+- `scripts/frigate-stats.sh [samples] [interval]` prints inference ms, detections/s, skipped/s per camera, Frigate CPU, iGPU busy %, GTT memory.
+
+**Config decisions**
+- Cameras read `rtsp://cams:8554/camN` (detect + record roles), detect stream 1280x720 at **5 fps**, VA-API decode (`ffmpeg.hwaccel_args: preset-vaapi`): ffmpeg uses only ~3% CPU per camera.
+- Detector: ONNX Runtime + MIGraphX, YOLO11n at 320x320 (`yolo-generic`, nchw, float). **Two detector instances** (`onnx0`, `onnx1`).
+- Labels: Frigate's built-in coco-80 labelmap folds bus and truck into "car" (and then refuses to track them). `labelmap-coco80.txt` is the standard COCO-80 list, so person, bicycle, car, motorcycle, bus, truck are distinct (a bus was not seen in these clips, trucks/vans appear as "truck"). "forklift" does not exist in COCO.
+- Zones (relative coordinates): cam1 `crosswalk`, cam2 `packing_line`, cam3 `junction`. Alerts require the zone and the label list per camera. Gotcha: write `1.0`, not `1.00`: Frigate compares coordinate strings lexicographically and treats `1.00 > 1.0` as "pixel coordinates", then fails with "Coordinates must be relative".
+- Motion (cam1, cam2): `threshold: 50, contour_area: 80, improve_contrast: false` (needed or detection never starts, see step 2).
+- Retention: only alerts are recorded, for 0.05 days (~72 min), snapshots 0.05 days, `expire_interval: 5`. The first attempt (1 day) wrote ~2.5 GB of recordings in 13 minutes because the looping clips keep every camera in alert state permanently. With the new settings it was 0.79 GB recordings + 0.14 GB clips after 8 minutes; it should level off around 7-8 GB (not yet observed at steady state, check in the step 6 soak test).
+- Timezone Europe/Rome (container `TZ` and `ui.timezone`). Auth disabled (documented in the config).
+- The first start compiles the model for gfx1103: about 80 s per model (cached in `frigate/config/model_cache/migraphx`, owned by root, so cleaning it needs sudo).
+
+**Measured (3 cameras, 5 fps, VLM stopped)**
+
+| variant | inference | detections/s | skipped/s | iGPU busy | Frigate CPU |
+|---|---|---|---|---|---|
+| s, 1 detector, 5 fps (start) | 11 ms | ~92 | ~5 | ~89% | ~30% |
+| n, 1 detector | 6 ms | ~86 | ~6 | ~80% | ~28% |
+| s, 2 detectors | 12 ms | ~135 | 0.2-2 | ~91% | ~55% |
+| **n, 2 detectors (chosen)** | **6-7 ms** | **130-150** | **0.0** | **~66-71%** | **~35%** |
+| s, 2 detectors, 3 fps | 14 ms | ~76-90 | 0.0 | ~70-79% | ~28% |
+
+- With one detector the bottleneck is the **Python side of the detector process** (about 90% of one core), not the GPU: even YOLO11n still skipped frames. Two instances fix it. Each detector process then uses ~58% of a core; host CPU is ~60-65% idle.
+- Detection volume is high because Frigate runs one inference per motion region (about 6 regions per frame in these busy clips), ~45 inferences/s per camera.
+- GPU memory (GTT) with Frigate alone: ~0.4-0.6 GiB. Whole stack idle recordings aside, host RAM use is moderate.
+- Events: 200 events in ~4 minutes (82 person + 46 person cam2, cars, bicycles, trucks), zones attached correctly, 42 review items (alerts and detections). Zones and boxes drawn correctly in the debug frames.
+- Not measured: accuracy of YOLO11n vs YOLO11s (n looks fine on the debug frames; s is available via `scripts/export-yolo.sh s`) and 416px input.
+
+### OPEN ISSUE: GPU hangs when Frigate (ROCm) and the VLM (Vulkan) share the iGPU
+- Frigate alone ran many restarts and several 10+ minute stretches without a single GPU error.
+- With the VLM container running next to Frigate (VLM loaded in memory, Frigate detecting at 60-90% GPU), the GPU **hung and was reset** three times:
+  1. Frigate start while the VLM was loaded (first inference after compile), twice in a row;
+  2. starting the VLM container while Frigate was running;
+  3. the 2nd VLM request while Frigate was detecting (the first request worked: prompt 3.3 s instead of 2.5 s, generation 28 vs 34 t/s). The VLM got HTTP 500.
+- Frigate's log: `HW Exception by GPU node-1 ... reason :GPU Hang`, `Fatal Python error: Aborted`, then the watchdog restarts it. Kernel log: `amdgpu: MES failed to respond to msg=REMOVE_QUEUE`, `failed to remove hardware queue from MES`, `MES might be in unrecoverable state, issue a GPU reset`, then `MODE2 reset`, `GPU reset succeeded`, `device wedged, but recovered through reset`.
+- Pattern: it fails when the scheduler (MES) has to create/remove/preempt GPU queues while the GPU is saturated by a compute workload and a second client (Vulkan) is active. It is a kernel/firmware scheduling problem, not a Frigate config problem.
+- Things to try (step 4, all untested): (a) kernel boot parameter `amdgpu.cwsr_enable=0` (known workaround for MES queue-eviction hangs on gfx1103; needs a GRUB change and reboot, so ask first); (b) `amdgpu.mes=0`; (c) lower detector pressure so the GPU is not saturated (fewer regions, `detect.fps` 3, YOLO11n); (d) run the VLM through ROCm/HIP instead of Vulkan so both use the same KFD queue path; (e) fall back to detection on the CPU (OpenVINO) with only the VLM on the iGPU.
+- Until this is solved, **keep the VLM stopped while Frigate runs** (it is stopped now) or the other way round.
+
+**Not done / caveats**
+- The VLM is not connected to Frigate yet (step 4), and the demo UI is step 5.
+- Detection accuracy vs YOLO11s was not quantified.
+- Only 3-8 minute runs with the final config (no GPU errors); long-run stability is for step 6.
+
+**Gotchas**
+- `docker compose restart frigate` leaves old log lines: use `docker logs --since <time>` when counting hangs.
+- Files Frigate writes (`frigate.db`, recordings, MIGraphX cache) are owned by root; use `sudo rm` to reset them.
+- Frigate's watchdog restarts the whole Frigate process on a detector crash, and the `restart: unless-stopped` policy brings it back; after a GPU reset it usually recovers on its own.

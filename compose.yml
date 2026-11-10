@@ -59,3 +59,32 @@ services:
       timeout: 20s
       retries: 6
       start_period: 20s
+
+  frigate:
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2-rocm}
+    container_name: askcam-frigate
+    restart: unless-stopped
+    depends_on:
+      cams:
+        condition: service_healthy
+    shm_size: 512mb
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-990}"
+    environment:
+      - TZ=Europe/Rome
+      # VA-API driver for the iGPU video decode engine
+      - LIBVA_DRIVER_NAME=radeonsi
+    volumes:
+      - ./frigate/config:/config
+      - ./frigate/media:/media/frigate
+    tmpfs:
+      - /tmp/cache:size=1g
+    ports:
+      - "${FRIGATE_UI_PORT:-8971}:8971"
+      # unauthenticated API/UI, loopback only (used by scripts on the host)
+      - "127.0.0.1:5000:5000"
+

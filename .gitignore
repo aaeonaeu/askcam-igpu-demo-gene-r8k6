@@ -7,9 +7,12 @@ media/*.mkv
 media/*.webm
 media/src/
 # Frigate runtime data
-frigate/db/
+# (Frigate keeps its db/secrets in /config, so whitelist only the files we author)
+frigate/config/*
+!frigate/config/config.yml
+!frigate/config/labelmap-*.txt
 frigate/media/
-frigate/config/model_cache/
+.cache/
 # offline bundles
 *.tar
 *.tar.gz
