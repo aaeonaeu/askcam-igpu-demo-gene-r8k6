@@ -1,0 +1,14 @@
+# host-specific settings and secrets
+.env
+# large artifacts recreated by scripts
+models/
+media/*.mp4
+media/*.mkv
+# Frigate runtime data
+frigate/db/
+frigate/media/
+frigate/config/model_cache/
+# offline bundles
+*.tar
+*.tar.gz
+*.tgz
