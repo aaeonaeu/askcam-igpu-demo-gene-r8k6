@@ -1,0 +1,44 @@
+name: askcam
+
+services:
+  vlm:
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan}
+    container_name: askcam-vlm
+    restart: unless-stopped
+    devices:
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-990}"
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "${VLM_PORT:-8080}:8080"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -m
+      - /models/${VLM_MODEL_FILE}
+      - --mmproj
+      - /models/${VLM_MMPROJ_FILE}
+      - --alias
+      - ${VLM_ALIAS:-vlm}
+      - -ngl
+      - "99"
+      - -c
+      - "${VLM_CTX:-8192}"
+      - -np
+      - "${VLM_PARALLEL:-2}"
+      - --image-max-tokens
+      - "${VLM_IMAGE_MAX_TOKENS:-512}"
+      - -fa
+      - "on"
+      - --metrics
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s

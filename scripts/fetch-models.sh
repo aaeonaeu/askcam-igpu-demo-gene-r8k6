@@ -10,7 +10,7 @@ get() {  # get <repo> <file> [dest-name]
   local repo=$1 file=$2 dest=${3:-$2}
   if [ -s "models/$dest" ]; then echo "ok (cached): $dest"; return; fi
   echo "downloading: $dest"
-  curl -fL --retry 3 -C - -o "models/$dest.part" "$HF/$repo/resolve/main/$file"
+  curl -fL --retry 3 -C - --progress-bar -o "models/$dest.part" "$HF/$repo/resolve/main/$file"
   mv "models/$dest.part" "models/$dest"
 }
 
