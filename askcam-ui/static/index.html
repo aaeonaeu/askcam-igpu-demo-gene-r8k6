@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>askcam</title>
+<style>
+:root{
+  --bg:#0a0e14; --panel:#121a24; --line:#223042; --text:#eef3f9; --muted:#97a8bc;
+  --gpu:#ffb020; --det:#5aa9ff; --vlm:#c4a2ff; --dec:#2dd4bf; --ok:#5ee08a; --warn:#ff6b6b;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:20px/1.35 system-ui,"Segoe UI",Roboto,sans-serif;
+  display:grid;grid-template-rows:auto 1fr auto;gap:12px;padding:14px 18px;overflow:hidden}
+header{display:flex;align-items:center;gap:24px}
+.brand{font-size:30px;font-weight:800;letter-spacing:.02em}
+.brand span{color:var(--gpu)}
+.tag{color:var(--muted);font-size:20px}
+.tabs{margin-left:auto;display:flex;gap:10px}
+.tab{background:var(--panel);color:var(--text);border:2px solid var(--line);border-radius:12px;
+  padding:8px 20px;font:inherit;font-weight:600;cursor:pointer}
+.tab[aria-selected=true]{border-color:var(--gpu);color:var(--gpu)}
+main{display:grid;gap:12px;min-height:0;
+  grid-template-columns:1.3fr 1fr;grid-template-rows:1.12fr 1fr;
+  grid-template-areas:"view ask" "meters feed"}
+section{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;min-height:0;min-width:0;
+  display:flex;flex-direction:column}
+h2{font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:8px;
+  display:flex;justify-content:space-between;align-items:baseline}
+#view{grid-area:view;padding:0;overflow:hidden;position:relative;background:#000}
+#live{width:100%;height:100%;object-fit:contain;display:block}
+.badge{position:absolute;left:14px;top:12px;background:rgba(0,0,0,.65);border-radius:10px;padding:4px 14px;font-weight:700}
+.badge i{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--warn);margin-right:8px;animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.25}}
+#ask{grid-area:ask}
+.presets{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.preset{background:#18263a;color:var(--text);border:2px solid var(--line);border-radius:12px;padding:9px 12px;
+  font:inherit;font-size:19px;cursor:pointer;text-align:left}
+.preset:hover{border-color:var(--vlm)}
+form{display:flex;gap:8px;margin-bottom:10px}
+input{flex:1;background:#0d141d;color:var(--text);border:2px solid var(--line);border-radius:12px;padding:10px 14px;font:inherit;min-width:0}
+input:focus{outline:none;border-color:var(--vlm)}
+button.go{background:var(--vlm);color:#14102a;border:0;border-radius:12px;padding:10px 26px;font:inherit;font-weight:800;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+.answer{flex:1;display:flex;gap:14px;min-height:0}
+#answer{flex:1;font-size:26px;line-height:1.3;overflow:auto;min-width:0}
+#answer.idle{color:var(--muted);font-size:20px}
+#answer .cur{display:inline-block;width:.5em;background:var(--vlm);animation:pulse 1s infinite}
+#seen{width:210px;align-self:flex-start;border-radius:10px;border:1px solid var(--line);display:none}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;min-height:34px}
+.chip{background:#0d141d;border:1px solid var(--line);border-radius:999px;padding:3px 14px;font-size:17px;color:var(--muted)}
+.chip b{color:var(--text)}
+#meters{grid-area:meters}
+.grid{flex:1;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:1fr 1fr;gap:10px;min-height:0}
+.tile{background:#0d141d;border:1px solid var(--line);border-radius:12px;padding:8px 12px;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;position:relative}
+.tile .n{font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}
+.tile .v{font-size:34px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tile .v small{font-size:18px;font-weight:600;color:var(--muted)}
+.tile .s{font-size:15px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{height:8px;background:#1c2938;border-radius:4px;margin-top:auto;overflow:hidden}
+.bar div{height:100%;width:0;background:var(--c);transition:width .8s}
+.tile svg{position:absolute;right:0;bottom:0;left:0;width:100%;height:34%;opacity:.55;pointer-events:none}
+.tile svg polyline{fill:none;stroke:var(--c);stroke-width:2.5;vector-effect:non-scaling-stroke}
+.tile .bar{position:relative;z-index:1}
+#feed{grid-area:feed}
+#items{flex:1;overflow:hidden;display:flex;flex-direction:column;gap:8px}
+.item{display:flex;gap:12px;background:#0d141d;border:1px solid var(--line);border-radius:12px;padding:7px;min-height:0}
+.item.new{animation:flash 2.5s}
+@keyframes flash{0%{border-color:var(--ok);background:#12281d}100%{}}
+.item img{width:92px;height:68px;object-fit:cover;border-radius:8px;flex:none;background:#000}
+.item .m{font-size:15px;color:var(--muted)}
+.item .t{font-size:19px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.empty{color:var(--muted);padding:8px}
+footer{text-align:center;color:var(--muted);font-size:18px;letter-spacing:.03em}
+footer b{color:var(--text)}
+.eng{display:inline-block;width:12px;height:12px;border-radius:3px;margin:0 6px 0 14px}
+@media (max-width:1100px),(max-height:700px){
+  body{overflow:auto;height:auto}
+  main{grid-template-columns:1fr;grid-template-rows:none;grid-template-areas:"view" "ask" "meters" "feed"}
+  #view{aspect-ratio:16/9}
+  .grid{grid-template-columns:repeat(2,1fr);grid-template-rows:none}
+  .tile{min-height:120px}
+  header{flex-wrap:wrap}.tabs{margin-left:0}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">ask<span>cam</span></div>
+  <div class="tag">One chip, three engines — video decode · detection · language model</div>
+  <div class="tabs" id="tabs" role="tablist"></div>
+</header>
+
+<main>
+  <section id="view">
+    <img id="live" alt="">
+    <div class="badge"><i></i><span id="camname"></span></div>
+  </section>
+
+  <section id="ask">
+    <h2>Ask the camera <span id="ctx"></span></h2>
+    <div class="presets" id="presets"></div>
+    <form id="form">
+      <input id="q" autocomplete="off" maxlength="300" placeholder="Ask anything about what the camera sees…">
+      <button class="go" id="go" type="submit">Ask</button>
+    </form>
+    <div class="answer">
+      <div id="answer" class="idle">The answer appears here, word by word, generated on the iGPU.</div>
+      <img id="seen" alt="frame the model looked at" title="frame the model looked at">
+    </div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <section id="meters">
+    <h2>Live load <span>updated every second</span></h2>
+    <div class="grid">
+      <div class="tile" style="--c:var(--gpu)"><div class="n">iGPU compute</div><div class="v" id="v-gpu">–</div><div class="s" id="s-gpu"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-gpu"/></svg><div class="bar"><div id="b-gpu"></div></div></div>
+      <div class="tile" style="--c:var(--det)"><div class="n">Detection · ROCm</div><div class="v" id="v-det">–</div><div class="s" id="s-det"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-det"/></svg><div class="bar"><div id="b-det"></div></div></div>
+      <div class="tile" style="--c:var(--vlm)"><div class="n">Language model · Vulkan</div><div class="v" id="v-vlm">–</div><div class="s" id="s-vlm"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-vlm"/></svg><div class="bar"><div id="b-vlm"></div></div></div>
+      <div class="tile" style="--c:var(--dec)"><div class="n">Video decode · VCN</div><div class="v" id="v-dec">–</div><div class="s" id="s-dec"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-dec"/></svg><div class="bar"><div id="b-dec"></div></div></div>
+      <div class="tile" style="--c:var(--gpu)"><div class="n">GPU shared memory</div><div class="v" id="v-gtt">–</div><div class="s" id="s-gtt"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-gtt"/></svg><div class="bar"><div id="b-gtt"></div></div></div>
+      <div class="tile" style="--c:#8ee07a"><div class="n">CPU</div><div class="v" id="v-cpu">–</div><div class="s" id="s-cpu"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-cpu"/></svg><div class="bar"><div id="b-cpu"></div></div></div>
+      <div class="tile" style="--c:#8ee07a"><div class="n">RAM</div><div class="v" id="v-ram">–</div><div class="s" id="s-ram"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-ram"/></svg><div class="bar"><div id="b-ram"></div></div></div>
+      <div class="tile" style="--c:#ff8a5c"><div class="n">Chip power</div><div class="v" id="v-pwr">–</div><div class="s" id="s-pwr"></div><svg viewBox="0 0 60 20" preserveAspectRatio="none"><polyline id="sp-pwr"/></svg><div class="bar"><div id="b-pwr"></div></div></div>
+    </div>
+  </section>
+
+  <section id="feed">
+    <h2>Events described by the AI <span id="feedcount"></span></h2>
+    <div id="items"><div class="empty">Waiting for the first description…</div></div>
+  </section>
+</main>
+
+<footer>
+  <b>100% local</b> · Ryzen 5 PRO 8640U · Radeon 760M · ROCm + Vulkan · no cloud
+  <span class="eng" style="background:var(--dec)"></span>decode
+  <span class="eng" style="background:var(--det)"></span>detection
+  <span class="eng" style="background:var(--vlm)"></span>language model
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const PRESETS = ["What is happening?", "Is anyone without safety gear?", "Count the vehicles", "Anything unusual?"];
+let cams = [], cam = null, asking = false, camNames = {};
+
+// ---------- cameras + live view
+async function init() {
+  const cfg = await (await fetch("/api/config")).json();
+  cams = cfg.cameras; cams.forEach(c => camNames[c.id] = c.name);
+  $("tabs").innerHTML = "";
+  cams.forEach(c => {
+    const b = document.createElement("button");
+    b.className = "tab"; b.textContent = c.name; b.role = "tab"; b.dataset.id = c.id;
+    b.onclick = () => selectCam(c.id);
+    $("tabs").appendChild(b);
+  });
+  PRESETS.forEach(p => {
+    const b = document.createElement("button");
+    b.className = "preset"; b.type = "button"; b.textContent = p;
+    b.onclick = () => { $("q").value = p; ask(p); };
+    $("presets").appendChild(b);
+  });
+  const hash = location.hash.slice(1);
+  selectCam(camNames[hash] ? hash : cams[0].id);
+  meters(); feed(); setInterval(feed, 3000);
+}
+function selectCam(id) {
+  cam = id;
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.id === id));
+  $("camname").textContent = "LIVE · " + camNames[id];
+  $("ctx").textContent = camNames[id];
+  history.replaceState(null, "", "#" + id);
+  startLive();
+}
+let liveTimer;
+function startLive() {
+  clearTimeout(liveTimer);
+  const img = $("live");
+  img.src = "";                       // closes the previous MJPEG connection
+  img.onerror = () => { liveTimer = setTimeout(startLive, 2000); };
+  img.src = "/api/live/" + cam + "?t=" + Date.now();
+}
+
+// ---------- ask the camera
+$("form").onsubmit = e => { e.preventDefault(); ask($("q").value.trim()); };
+function chip(label, value) { return `<span class="chip">${label} <b>${value}</b></span>`; }
+async function ask(question) {
+  if (!question || asking) return;
+  asking = true; setBusy(true);
+  const ans = $("answer"), chips = $("chips");
+  ans.className = ""; ans.textContent = ""; chips.innerHTML = ""; $("seen").style.display = "none";
+  const t0 = performance.now();
+  const timer = setInterval(() => { chips.innerHTML = chip("thinking", ((performance.now() - t0) / 1000).toFixed(1) + " s"); }, 100);
+  let text = "", firstSeen = false;
+  try {
+    const r = await fetch("/api/ask", { method: "POST", headers: {"Content-Type": "application/json"},
+                                         body: JSON.stringify({camera: cam, question}) });
+    if (r.status === 429) { ans.className = "idle"; ans.textContent = "Another question is still being answered — try again in a moment."; return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const {value, done} = await rd.read(); if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!line.startsWith("data: ")) continue;
+        const m = JSON.parse(line.slice(6));
+        if (m.type === "frame") { $("seen").src = "data:image/jpeg;base64," + m.b64; $("seen").style.display = "block"; }
+        else if (m.type === "token") {
+          if (!firstSeen) { firstSeen = true; clearInterval(timer); chips.innerHTML = chip("first word after", ((performance.now() - t0) / 1000).toFixed(1) + " s"); }
+          text += m.t; ans.textContent = text; ans.insertAdjacentHTML("beforeend", '<span class="cur">&nbsp;</span>');
+        } else if (m.type === "done") {
+          ans.textContent = text;
+          chips.innerHTML = chip("first word", (m.ttft_ms / 1000).toFixed(1) + " s") + chip("speed", (m.tok_s ?? "–") + " tok/s") +
+            chip("total", (m.total_ms / 1000).toFixed(1) + " s") + chip("camera", camNames[cam]);
+        } else if (m.type === "error") { ans.className = "idle"; ans.textContent = m.msg; }
+      }
+    }
+  } catch (e) {
+    ans.className = "idle"; ans.textContent = "Something went wrong: " + e.message;
+  } finally {
+    clearInterval(timer); asking = false; setBusy(false);
+  }
+}
+function setBusy(b) { document.querySelectorAll(".preset,#go").forEach(x => x.disabled = b); }
+
+// ---------- meters
+const hist = {};
+function push(k, v, max) {
+  const h = hist[k] = hist[k] || []; h.push(v ?? 0); if (h.length > 60) h.shift();
+  const el = $("sp-" + k); if (!el) return;
+  const m = max || Math.max(1, ...h);
+  const pts = h.map((x, i) => `${(60 - h.length + i)},${(20 - 19 * Math.min(1, x / m)).toFixed(1)}`);
+  el.setAttribute("points", pts.join(" "));
+}
+const f1 = x => (x ?? 0).toFixed(1);
+function setTile(k, v, s, pct) {
+  $("v-" + k).innerHTML = v; $("s-" + k).textContent = s;
+  $("b-" + k).style.width = Math.max(0, Math.min(100, pct || 0)) + "%";
+}
+function render(d) {
+  if (d.gpu) { setTile("gpu", `${d.gpu.busy ?? "–"}<small> %</small>`, `peak ${d.gpu.peak ?? "–"} % · all engines share it`, d.gpu.busy); push("gpu", d.gpu.busy, 100); }
+  if (d.detect) { setTile("det", `${Math.round(d.detect.fps)}<small> /s</small>`, `${f1(d.detect.ms)} ms each · skipped ${d.detect.skipped_fps}/s`, d.detect.duty); push("det", d.detect.fps); }
+  if (d.vlm) {
+    const v = d.vlm, gen = v.gen_tok_s > 0;
+    const st = v.active > 0 || v.requests > 0 ? (gen ? "answering" : "reading image") : "idle";
+    setTile("vlm", `<span style="font-size:${st === "idle" ? 34 : 28}px">${st}</span>`,
+      gen ? `${f1(v.gen_tok_s)} tok/s generated` : (v.prompt_tok_s > 0 ? `${v.prompt_tok_s} tok/s image + prompt` : `busy ${v.active} % of the last second`), v.active);
+    push("vlm", v.active, 100);
+  }
+  if (d.decode) { const c = d.decode; setTile("dec", `${c.fps}<small> fps</small>`, `${c.streams} × ${c.desc} · ${(c.ffmpeg_cpu / 100).toFixed(2)} CPU core`, Math.min(100, c.fps / 60 * 100)); push("dec", c.fps, 60); }
+  if (d.gtt) { setTile("gtt", `${f1(d.gtt.used_gib)}<small> GiB</small>`, `of ${f1(d.gtt.total_gib)} GiB shared with the CPU`, d.gtt.pct); push("gtt", d.gtt.pct, 100); }
+  if (d.cpu) { setTile("cpu", `${Math.round(d.cpu.pct)}<small> %</small>`, `${Math.round(100 - d.cpu.pct)} % free for your application`, d.cpu.pct); push("cpu", d.cpu.pct, 100); }
+  if (d.ram) { setTile("ram", `${f1(d.ram.used_gib)}<small> GiB</small>`, `of ${Math.round(d.ram.total_gib)} GiB`, d.ram.pct); push("ram", d.ram.pct, 100); }
+  if (d.power_w != null) {
+    const t = d.temp_c || {};
+    setTile("pwr", `${Math.round(d.power_w)}<small> W</small>`, `CPU ${t.cpu ?? "–"} °C · GPU ${t.gpu ?? "–"} °C`, d.power_w / 28 * 100); push("pwr", d.power_w, 30);
+  }
+}
+function meters() {
+  const es = new EventSource("/api/meters/stream");
+  es.onmessage = e => render(JSON.parse(e.data));
+}
+
+// ---------- event feed
+const seen = new Set(); let firstFeed = true;
+function ago(t) { const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? Math.round(s) + " s ago" : Math.round(s / 60) + " min ago"; }
+const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+async function feed() {
+  try {
+    const d = await (await fetch("/api/feed")).json();
+    $("feedcount").textContent = `${d.described} described · ${d.objects} objects seen in ${d.window_min} min`;
+    if (!d.events.length) return;
+    $("items").innerHTML = d.events.slice(0, 4).map(e => {
+      const fresh = !firstFeed && !seen.has(e.id);
+      return `<div class="item${fresh ? " new" : ""}"><img src="/api/thumb/${e.id}" alt="">
+        <div><div class="m">${esc(camNames[e.camera] || e.camera)} · ${esc(e.label)}${e.zones.length ? " · " + esc(e.zones.join(", ")) : ""} · ${ago(e.start)}</div>
+        <div class="t">${esc(e.text)}</div></div></div>`;
+    }).join("");
+    d.events.forEach(e => seen.add(e.id)); firstFeed = false;
+  } catch (e) {}
+}
+init();
+</script>
+</body>
+</html>

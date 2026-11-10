@@ -182,3 +182,42 @@ Chosen after rejecting: a tornado security camera (Fort Pierce), a talking-head 
 - Which eligible objects get a description is first-come at the gate, not by importance.
 - Review summaries (Frigate "Review" GenAI) are off; semantic search is off.
 - Long-run stability with GenAI on was ~1 h in total; the 60-minute soak is step 6.
+
+## Step 5: "Ask the camera" page and live load meters (done)
+
+Service `askcam-ui` (FastAPI + one static page, no build step) on `http://<host>:8000`, `#cam1|#cam2|#cam3` selects a camera. Image `python:3.12-slim`, ~40 MiB RAM, ~2% CPU. Layout is designed for 1920x1080 (dark theme, 20 px base font); below 1100 px width it stacks.
+
+### What it does
+- **Live view:** Frigate MJPEG with detection boxes (`/api/<cam>?fps=6&h=540&bbox=1`), proxied through the UI so the browser only talks to :8000. Opening it did not change detection: skipped 0.04/s, detector 7.9 ms (baseline 0.05/s, 8.6 ms).
+- **Ask the camera:** `POST /api/ask` grabs a clean (no boxes) 720p frame from `latest.jpg`, sends frame + question to `http://vlm:8080` directly (not through vlm-gate), and relays tokens as server-sent events. A short system prompt asks for at most two sentences, only what is visible. One question at a time (a second one gets HTTP 429 "busy"). 4 preset buttons plus free text. The page shows the frame the model saw, first-word time, tok/s and total time.
+- **Events feed:** Frigate `/api/events` of the last 10 minutes, filtered to those with a GenAI description; counter "N described · M objects seen in 10 min".
+- **Meters (SSE, 1 Hz, 60 s sparklines):** iGPU compute, detection, language model, video decode, GPU shared memory, CPU, RAM, chip power + temperatures.
+
+### Where each meter comes from
+| Meter | Source | Notes |
+|---|---|---|
+| iGPU compute % | `gpu_busy_percent`, sampled 5 Hz, averaged per second | whole-GPU number, all engines together |
+| Detection | Frigate `/api/stats` (every 2 s) | inferences/s = sum of `detection_fps`; bar = detector duty = inferences/s x ms / number of detectors |
+| Language model | llama.cpp `/slots` at 5 Hz (share of the second the server was busy) and `/metrics` (tokens_predicted_total delta = tok/s) | state "idle / reading image / answering"; image+prompt tok/s only shown when the counter moves |
+| Video decode | stream count x source fps (env `CAM_SOURCE_FPS`, 15) and Frigate `ffmpeg_cpu` | **estimate of work, not a hardware counter**: amdgpu exposes no VCN utilisation here (`gpu_metrics` `average_mm_activity` stays 0 while 3 streams decode) |
+| GTT memory | `mem_info_gtt_used/total` | |
+| CPU / RAM | `/proc/stat`, `/proc/meminfo` (host values, they are not namespaced) | |
+| Power / temp | amdgpu hwmon `power1_average` (whole APU socket, ~27-29 W under demo load), `k10temp` | RAPL `energy_uj` is root-only, so it is not used |
+
+Compose mounts `/sys` read-only at `/host/sys`; the amdgpu card is found by PCI vendor 0x1002 plus the presence of `gpu_busy_percent`, so the card index does not matter. A per-engine split of iGPU compute (detection vs VLM) is not available: DRM fdinfo (`drm-engine-compute`) shows only the Vulkan process, ROCm/KFD queues are not listed, and reading it needs root plus the host PID namespace. The tiles therefore show each engine's own activity next to the total.
+
+### Measured (`scripts/ui-test.py 3`: 9 questions across 3 cameras, everything running)
+| | Result |
+|---|---|
+| First word | p50 3.2 s, range 2.9-3.8 s (frame grab ~40 ms; most of it is image encoding + prompt on the iGPU) |
+| Speed | median 23.8 tok/s; a few answers 4-6 tok/s when a Frigate description ran at the same moment |
+| Total per answer | 3.4-5.5 s |
+| Detection while answering | skipped 0.43/s on average (max 1.8/s) of ~12 fps total, vs 0.05/s idle; detector 13.2 ms (max 15.6) vs 8.6 ms |
+
+Detection never stops, but it is not completely free: frames are skipped in bursts while the VLM reads the image. Roughly 3-4% of frames in the test. The "no skipped frames at all" goal is not met; the step 4 average (0.02/s) holds without questions.
+
+### Known limits
+- Browser check done only with a headless Firefox screenshot of a populated page at 1920x1080 (layout, no text overflow after shortening the sub-labels). The Chrome extension was not connected, so an actual click-through in a browser was not done; the same API calls are covered by `scripts/ui-test.py`.
+- The UI port is unauthenticated and the page proxies Frigate read-only (live, thumbnails, event list). Fine for a booth LAN, do not expose it.
+- Answers are from a 3B model: counts and "without helmet" style judgements are sometimes wrong (e.g. it called a cyclist helmet-less). Presets are intentionally generic.
+- Frigate described-percentage is still low by design (step 4), so the feed updates every ~10 s, not every object.

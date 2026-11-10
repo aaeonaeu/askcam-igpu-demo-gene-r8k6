@@ -105,3 +105,24 @@ services:
       # unauthenticated API/UI, loopback only (used by scripts on the host)
       - "127.0.0.1:5000:5000"
 
+  askcam-ui:
+    build: ./askcam-ui
+    image: askcam-ui:local
+    container_name: askcam-ui
+    restart: unless-stopped
+    depends_on:
+      frigate:
+        condition: service_healthy
+      vlm:
+        condition: service_healthy
+    environment:
+      - FRIGATE_URL=http://frigate:5000
+      # questions go straight to the VLM; only Frigate's GenAI goes through vlm-gate
+      - VLM_URL=http://vlm:8080
+      - VLM_ALIAS=${VLM_ALIAS:-vlm}
+      - HOST_SYS=/host/sys
+    volumes:
+      # read-only: gpu_busy_percent, mem_info_gtt_*, hwmon power/temperature
+      - /sys:/host/sys:ro
+    ports:
+      - "${UI_PORT:-8000}:8000"
