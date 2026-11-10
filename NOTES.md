@@ -111,7 +111,7 @@ Chosen after rejecting: a tornado security camera (Fort Pierce), a talking-head 
 - Events: 200 events in ~4 minutes (82 person + 46 person cam2, cars, bicycles, trucks), zones attached correctly, 42 review items (alerts and detections). Zones and boxes drawn correctly in the debug frames.
 - Not measured: accuracy of YOLO11n vs YOLO11s (n looks fine on the debug frames; s is available via `scripts/export-yolo.sh s`) and 416px input.
 
-### OPEN ISSUE: GPU hangs when Frigate (ROCm) and the VLM (Vulkan) share the iGPU
+### (SOLVED in step 4 with `amdgpu.cwsr_enable=0`) GPU hangs when Frigate (ROCm) and the VLM (Vulkan) share the iGPU
 - Frigate alone ran many restarts and several 10+ minute stretches without a single GPU error.
 - With the VLM container running next to Frigate (VLM loaded in memory, Frigate detecting at 60-90% GPU), the GPU **hung and was reset** three times:
   1. Frigate start while the VLM was loaded (first inference after compile), twice in a row;
@@ -131,3 +131,54 @@ Chosen after rejecting: a tornado security camera (Fort Pierce), a talking-head 
 - `docker compose restart frigate` leaves old log lines: use `docker logs --since <time>` when counting hangs.
 - Files Frigate writes (`frigate.db`, recordings, MIGraphX cache) are owned by root; use `sudo rm` to reset them.
 - Frigate's watchdog restarts the whole Frigate process on a detector crash, and the `restart: unless-stopped` policy brings it back; after a GPU reset it usually recovers on its own.
+
+## Step 4: Frigate GenAI with the local VLM + shared-iGPU tuning (done 2026-11-10)
+
+### 1. GPU hang fix: kernel parameter `amdgpu.cwsr_enable=0`
+- Added via `/etc/default/grub.d/99-askcam-amdgpu.cfg` (+ `update-grub`, reboot). Undo: delete the file, `sudo update-grub`, reboot. Check: `cat /sys/module/amdgpu/parameters/cwsr_enable` must print `0`. **This is a host requirement for the demo** (step 6 README must say so). `amdgpu.mes` is already 0 by default and is unrelated.
+- What it does: disables Compute Wave Save/Restore, so the GPU scheduler (MES) no longer preempts compute queues mid-wave. The hang (`MES failed to respond to msg=REMOVE_QUEUE`) happened exactly when queues were removed/preempted under load.
+- `scripts/gpu-stress.sh transitions`: VLM start while detecting, 20 VLM requests, Frigate restart with VLM loaded, 5 requests, VLM restart, 3 VLM stop/start cycles: **0 GPU resets, 0 Frigate GPU hangs** (before the fix the same kind of sequence reset the GPU 3 times in ~10 min).
+- `scripts/gpu-stress.sh soak 30`: 30 min, a VLM request every ~12 s while detection runs: **151/151 requests OK, 0 resets, 0 hangs**. VLM wall 3.90 s avg (max 4.69), prompt 3.09 s, generation 23.9 t/s; detector skipped 1.13 frames/s avg (5 fps then).
+- About 50 further minutes of real GenAI traffic afterwards: still 0 resets this boot.
+
+### 2. GenAI wiring
+- `genai.vlm`: provider **`llamacpp`** (Frigate 0.18 has a native llama.cpp provider; it reads `/v1/models` and `/props`), `base_url: http://vlm-gate:8080`, `model: vlm`, `roles: [descriptions]`, `provider_options: {max_tokens: 70, temperature: 0.2}`.
+- `objects.genai`: enabled, **`use_snapshot: true`** (one cropped snapshot per object; the default sends up to 10 thumbnails = 10x the image tokens), trigger on `tracked_object_end` only. Review-item GenAI (multi-frame summaries) is **not** enabled: too heavy for this iGPU next to detection.
+- Per-camera prompts (one sentence, at most 25 words, "do not invent details"). An earlier prompt that listed example activities ("operating a pallet jack") made the model claim them as facts; listing activities was removed.
+- Per-camera label/zone selection for descriptions: cam1 `[bicycle, motorcycle, bus, truck]` in `crosswalk`; cam2 `[person]` in a new small `aisle` zone (top-left walkway); cam3 `[truck, bus, motorcycle, bicycle]` in `junction`. Alerts/zones for review are unchanged.
+
+### 3. vlm-gate (new service, `vlm-gate/default.conf.template`, nginx 1.29-alpine)
+- Why: Frigate starts a **new thread/HTTP request for every finished tracked object, with no concurrency limit**. These looping busy clips end ~170 objects per minute (cam1 alone ~70 people/min). Without a limit, ~150 requests piled up in llama.cpp and 95 timed out (504 after 120 s) while the GPU ran at 100%.
+- The gate admits **1 request at a time and at most 8/min** (`VLM_GATE_CONCURRENCY`, `VLM_GATE_RATE` in `.env`); others get an immediate 503 (Frigate logs a warning and that object has no description). `/v1/models`, `/props`, `/health` pass through.
+- Gotcha: nginx ignores requests whose `limit_*` key is empty; the first version keyed on `$server_name` (empty) and limited nothing. Now a constant key via `map`.
+- Interactive questions (step 5 UI) should call `http://vlm:8080` directly, not the gate.
+
+### 4. Tuning, before/after (3 cameras, all running together)
+
+| setting | described (of ended objects) | object end -> description p50 / p90 | detector skipped/s avg (max) | inference | iGPU busy |
+|---|---|---|---|---|---|
+| GenAI off (step 3, 5 fps) | - | - | 0.0 | 6-7 ms | ~68% |
+| 5 fps, all labels, gate 12/min | 6% | 5.4 s / 8.6 s | 1.19 (2.3) | 12.8 ms | 86% |
+| 4 fps, label selection, gate 8/min | 4% (25 in 4 min) | 4.8 s / 8.0 s | 0.02 (0.1) | 9.6 ms | 72% |
+| **+ cam2 `aisle` zone (chosen)** | **29 in 5 min, all 3 cameras** | **4.5 s / 7.4 s** | **0.02 (0.3)** | **9.7 ms** | **69%** |
+| same, gate 10/min | 32 in 5 min | 4.4 s / 7.3 s | 0.08 (1.2) | 13.4 ms | 72% |
+
+- Chosen: detect **4 fps**, gate **8/min, concurrency 1**, YOLO11n, 2 detectors. ~6 descriptions/min reach the UI; detection keeps up (skips ~0).
+- 10/min gives barely more (concurrency 1 already caps throughput at ~7/min with ~4.5 s per request) and brings skips back.
+- "Described %" is low by design: ~170 objects end per minute in these clips, and only selected labels/zones are eligible; ~25% of eligible requests are admitted.
+- Example descriptions: cam3 truck "The truck is a white van with the text "Polar Granit" on its side, and it is driving through a road junction." cam2 "The person is walking in a warehouse walkway, wearing a yellow hi-vis vest." cam1 "The cyclist is riding through a busy city intersection, heading towards an unknown destination."
+
+### 5. VLM numbers with detection running
+- Direct (interactive-style) question on a full 720p frame while detection + GenAI run: wall 3.6-4.9 s, time to first token (prompt eval) 3.0-4.2 s, ~15-token answer. Generation drops to ~8-9 t/s when a GenAI request is running in the other slot at the same time, ~21-24 t/s otherwise (34 t/s with the iGPU idle).
+- Detector inference rises from 6-7 ms to ~10-13 ms while the VLM runs.
+- GTT memory with everything loaded: ~4.0 GiB of ~7.5 GiB.
+
+### Scripts added
+- `scripts/gpu-stress.sh transitions|soak [min]`: repeatable shared-iGPU stress test; counts `GPU reset`/`MES failed`/`wedged` in the kernel log and Frigate "GPU Hang" lines. Logs in `logs/` (git-ignored).
+- `scripts/genai-latency.py [min]`: coverage and latency of AI descriptions (object end -> description first seen), plus skipped fps and iGPU busy.
+
+### Caveats / not done
+- Latency is measured from the object's end time (Frigate only describes an object when it ends), polled every 2 s, so values are +/-2 s.
+- Which eligible objects get a description is first-come at the gate, not by importance.
+- Review summaries (Frigate "Review" GenAI) are off; semantic search is off.
+- Long-run stability with GenAI on was ~1 h in total; the 60-minute soak is step 6.

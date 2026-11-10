@@ -39,6 +39,18 @@ model:
   # Standard COCO-80 names (Frigate's built-in labelmap folds bus and truck into "car")
   labelmap_path: /config/labelmap-coco80.txt
 
+# GenAI: Frigate describes each finished tracked object with the local VLM (llama.cpp, Vulkan).
+# Requests go through vlm-gate (rate/concurrency limit), not straight to the VLM.
+genai:
+  vlm:
+    provider: llamacpp
+    base_url: http://vlm-gate:8080
+    model: vlm
+    roles: [descriptions]
+    provider_options:
+      max_tokens: 70
+      temperature: 0.2
+
 ffmpeg:
   hwaccel_args: preset-vaapi
 
@@ -46,10 +58,17 @@ detect:
   enabled: true
   width: 1280
   height: 720
-  fps: 5
+  # 4 fps (not 5) leaves iGPU headroom for the VLM; see NOTES.md step 4
+  fps: 4
 
 objects:
   track: [person, car, bus, truck, bicycle, motorcycle]
+  genai:
+    enabled: true
+    # one cropped snapshot per object instead of up to 10 thumbnails (10x fewer image tokens)
+    use_snapshot: true
+    send_triggers:
+      tracked_object_end: true
 
 # Short retention. The looping demo clips keep every camera in "alert" state all the time, which
 # produced ~2.5 GB of recordings per 13 minutes at the first attempt, so only alerts are kept and
@@ -99,6 +118,13 @@ cameras:
         friendly_name: Crosswalk
         coordinates: 0.00,0.60,0.55,0.56,1.0,0.68,1.0,1.0,0.00,1.0
         objects: [person, bicycle, motorcycle, car, bus, truck]
+    objects:
+      genai:
+        # only these labels are described (volume control, see NOTES.md step 4)
+        objects: [bicycle, motorcycle, bus, truck]
+        required_zones: [crosswalk]
+        prompt: >-
+          This is a cropped security-camera image of a {label} at a busy city street crossing. Answer in one sentence of at most 25 words: what the {label} is doing and where it is heading. Mention a safety issue only if one is clearly visible. Do not invent details.
     review:
       alerts:
         labels: [person, bicycle, motorcycle, car, bus, truck]
@@ -119,6 +145,19 @@ cameras:
         friendly_name: Packing line
         coordinates: 0.05,0.55,0.50,0.05,0.95,0.05,0.95,0.50,0.55,1.0,0.05,1.0
         objects: [person]
+      # walkway at the top left (people walking, pallet jacks): small zone used to pick
+      # which workers get an AI description, so cam2 does not take every VLM slot
+      aisle:
+        friendly_name: Aisle
+        coordinates: 0.0,0.0,0.45,0.0,0.45,0.30,0.20,0.48,0.0,0.48
+        objects: [person]
+    objects:
+      genai:
+        # only these labels are described (volume control, see NOTES.md step 4)
+        objects: [person]
+        required_zones: [aisle]
+        prompt: >-
+          This is a cropped overhead image of a {label} in a warehouse walkway. Answer in one sentence of at most 25 words: what the {label} is visibly doing and whether they wear a hi-vis vest. Mention a safety issue only if one is clearly visible. Do not invent details.
     review:
       alerts:
         labels: [person]
@@ -135,6 +174,13 @@ cameras:
         friendly_name: Junction
         coordinates: 0.00,0.33,1.0,0.33,1.0,0.75,0.00,0.75
         objects: [car, bus, truck, motorcycle, bicycle, person]
+    objects:
+      genai:
+        # only these labels are described (volume control, see NOTES.md step 4)
+        objects: [truck, bus, motorcycle, bicycle]
+        required_zones: [junction]
+        prompt: >-
+          This is a cropped security-camera image of a {label} at a road junction. Answer in one sentence of at most 25 words: the {label}'s type and color and what it is doing. Do not read number plates. Do not invent details.
     review:
       alerts:
         labels: [car, bus, truck, motorcycle, bicycle, person]

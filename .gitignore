@@ -17,3 +17,5 @@ frigate/media/
 *.tar
 *.tar.gz
 *.tgz
+# test logs
+logs/

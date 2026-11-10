@@ -1,0 +1,30 @@
+# vlm-gate: admission control in front of the VLM for Frigate's GenAI calls.
+# Frigate starts a new thread (= a new HTTP request) for EVERY finished tracked object, with no
+# concurrency limit. On busy cameras that is dozens of requests per minute, far more than the iGPU
+# can serve while it also runs detection. This gate lets at most ${VLM_GATE_CONCURRENCY} request(s)
+# through at a time and at most ${VLM_GATE_RATE}; the rest are rejected at once with 503 (Frigate logs a
+# warning and that object simply gets no description). Interactive questions (step 5 UI) go to
+# the vlm service directly and are not limited here.
+# one shared bucket for all callers (nginx ignores requests whose key is empty, so use a constant)
+map $host $vlm_gate_key { default "all"; }
+limit_conn_zone $vlm_gate_key zone=vlm_conn:1m;
+limit_req_zone  $vlm_gate_key zone=vlm_rate:1m rate=${VLM_GATE_RATE};
+
+server {
+    listen 8080;
+    client_max_body_size 32m;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+
+    location = /v1/chat/completions {
+        limit_conn vlm_conn ${VLM_GATE_CONCURRENCY};
+        limit_req zone=vlm_rate nodelay;
+        limit_conn_status 503;
+        limit_req_status 503;
+        proxy_pass http://vlm:8080;
+    }
+    # model info / props / health: pass through unlimited
+    location / {
+        proxy_pass http://vlm:8080;
+    }
+}

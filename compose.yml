@@ -60,6 +60,23 @@ services:
       retries: 6
       start_period: 20s
 
+  vlm-gate:
+    image: ${NGINX_IMAGE:-nginx:1.29-alpine}
+    container_name: askcam-vlm-gate
+    restart: unless-stopped
+    depends_on:
+      - vlm
+    environment:
+      - VLM_GATE_CONCURRENCY=${VLM_GATE_CONCURRENCY:-1}
+      - VLM_GATE_RATE=${VLM_GATE_RATE:-8r/m}
+    volumes:
+      - ./vlm-gate/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   frigate:
     image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.18.2-rocm}
     container_name: askcam-frigate
