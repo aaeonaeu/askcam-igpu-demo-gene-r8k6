@@ -21,8 +21,12 @@ vlm_req() {  # one request; prints "ok <wall s> <ttft ms> <gen t/s>" or "FAIL <c
   frame || { echo "FAIL noframe"; return; }
   python3 -I - <<'PY'
 import base64, json, time, urllib.request
+try:  # llama.cpp router: requests must name the loaded model
+    MODEL = next(m["id"] for m in json.load(urllib.request.urlopen("http://localhost:8080/models", timeout=5))["data"] if m["status"]["value"] == "loaded")
+except Exception:
+    MODEL = "vlm"
 img = base64.b64encode(open("logs/stress-frame.jpg", "rb").read()).decode()
-body = json.dumps({"model": "vlm", "max_tokens": 60, "temperature": 0.2, "cache_prompt": False,
+body = json.dumps({"model": MODEL, "max_tokens": 60, "temperature": 0.2, "cache_prompt": False,
     "messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + img}},
         {"type": "text", "text": "Describe what the people and vehicles are doing, in one sentence."}]}]}).encode()

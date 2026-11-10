@@ -5,6 +5,8 @@
 # through at a time and at most ${VLM_GATE_RATE}; the rest are rejected at once with 503 (Frigate logs a
 # warning and that object simply gets no description). Interactive questions (step 5 UI) go to
 # the vlm service directly and are not limited here.
+# Chat requests are forwarded to askcam-ui (/llm/...), which rewrites Frigate's fixed model name ("vlm")
+# to whichever model is currently loaded in the llama.cpp router (models are switched from the UI).
 # one shared bucket for all callers (nginx ignores requests whose key is empty, so use a constant)
 map $host $vlm_gate_key { default "all"; }
 limit_conn_zone $vlm_gate_key zone=vlm_conn:1m;
@@ -21,7 +23,7 @@ server {
         limit_req zone=vlm_rate nodelay;
         limit_conn_status 503;
         limit_req_status 503;
-        proxy_pass http://vlm:8080;
+        proxy_pass http://askcam-ui:8000/llm/v1/chat/completions;
     }
     # model info / props / health: pass through unlimited
     location / {

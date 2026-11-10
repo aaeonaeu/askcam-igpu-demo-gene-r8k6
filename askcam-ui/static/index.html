@@ -18,6 +18,30 @@ header{display:flex;align-items:center;gap:24px}
 .brand span{color:var(--gpu)}
 .tag{color:var(--muted);font-size:20px}
 .tabs{margin-left:auto;display:flex;gap:10px}
+.modelbtn{background:#18263a;color:var(--text);border:2px solid var(--vlm);border-radius:12px;padding:8px 18px;font:inherit;font-weight:600;cursor:pointer;white-space:nowrap}
+.modelbtn small{color:var(--muted);font-weight:500}
+.modelbtn.busy{border-color:var(--gpu);color:var(--gpu)}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:none;align-items:center;justify-content:center;z-index:10;padding:20px}
+#modal.open{display:flex}
+.sheet{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 24px;width:min(1500px,100%);max-height:100%;overflow:auto}
+.sheet h3{font-size:28px;margin-bottom:4px}
+.sheet .sub{color:var(--muted);margin-bottom:14px;font-size:18px}
+.mrow{display:grid;grid-template-columns:2.4fr repeat(6,.9fr) 1.3fr;gap:10px;align-items:center;padding:10px 12px;border:2px solid var(--line);border-radius:14px;margin-bottom:8px;background:#0d141d}
+.mrow.head{border:0;background:none;color:var(--muted);font-size:14px;text-transform:uppercase;letter-spacing:.08em;padding-bottom:0}
+.mrow.active{border-color:var(--vlm)}
+.mrow .nm{font-size:23px;font-weight:700}
+.mrow .nm small{display:block;font-size:15px;font-weight:500;color:var(--muted)}
+.mrow .c{font-size:23px;font-weight:700;font-variant-numeric:tabular-nums}
+.mrow .c small{display:block;font-size:14px;font-weight:500;color:var(--muted)}
+.mrow button{background:var(--vlm);color:#14102a;border:0;border-radius:10px;padding:9px 12px;font:inherit;font-weight:800;cursor:pointer;width:100%}
+.mrow button:disabled{opacity:.4;cursor:default}
+.tag{white-space:normal}
+.fit-ok{color:var(--ok)}.fit-tight{color:var(--gpu)}.fit-no{color:var(--warn)}
+.badge2{display:inline-block;border:2px solid var(--vlm);color:var(--vlm);border-radius:10px;padding:6px 10px;font-weight:800;text-align:center;width:100%}
+.note{color:var(--muted);font-size:16px;margin-top:10px}
+.banner{background:#2a2110;border:2px solid var(--gpu);color:var(--gpu);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:20px}
+.banner.err{background:#2a1313;border-color:var(--warn);color:var(--warn)}
+.closeb{float:right;background:#18263a;color:var(--text);border:2px solid var(--line);border-radius:10px;padding:6px 16px;font:inherit;cursor:pointer}
 .tab{background:var(--panel);color:var(--text);border:2px solid var(--line);border-radius:12px;
   padding:8px 20px;font:inherit;font-weight:600;cursor:pointer}
 .tab[aria-selected=true]{border-color:var(--gpu);color:var(--gpu)}
@@ -90,7 +114,20 @@ footer b{color:var(--text)}
   <div class="brand">ask<span>cam</span></div>
   <div class="tag">One chip, three engines — video decode · detection · language model</div>
   <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="modelbtn" id="modelbtn" type="button">Model: <span id="modelname">…</span> ▾</button>
 </header>
+
+<div id="modal" role="dialog" aria-label="Choose the language model">
+  <div class="sheet">
+    <button class="closeb" id="closeb" type="button">Close</button>
+    <h3>Language model</h3>
+    <div class="sub">One model is loaded at a time on the iGPU. Switching unloads the current one (about 10–30 s) and keeps all cameras running; Frigate descriptions pause meanwhile.</div>
+    <div id="mbanner"></div>
+    <div class="mrow head"><div>Model</div><div>GPU memory</div><div>First word</div><div>Speed</div><div>Detector</div><div>Skipped</div><div>Frigate AI</div><div></div></div>
+    <div id="mlist"></div>
+    <div class="note">Columns are measured while that model is loaded: GPU memory = growth when it loaded (estimate if not yet loaded), first word and speed = median of your questions, detector and skipped frames = average over the time it was loaded (including idle periods). Ask a few questions with each model to compare.</div>
+  </div>
+</div>
 
 <main>
   <section id="view">
@@ -186,7 +223,7 @@ function startLive() {
 $("form").onsubmit = e => { e.preventDefault(); ask($("q").value.trim()); };
 function chip(label, value) { return `<span class="chip">${label} <b>${value}</b></span>`; }
 async function ask(question) {
-  if (!question || asking) return;
+  if (!question || asking || modelState.switching || !modelState.active) return;
   asking = true; setBusy(true);
   const ans = $("answer"), chips = $("chips");
   ans.className = ""; ans.textContent = ""; chips.innerHTML = ""; $("seen").style.display = "none";
@@ -221,10 +258,58 @@ async function ask(question) {
   } catch (e) {
     ans.className = "idle"; ans.textContent = "Something went wrong: " + e.message;
   } finally {
-    clearInterval(timer); asking = false; setBusy(false);
+    clearInterval(timer); asking = false; setBusy(!!modelState.switching || !modelState.active);
   }
 }
 function setBusy(b) { document.querySelectorAll(".preset,#go").forEach(x => x.disabled = b); }
+
+// ---------- model picker
+let modalOpen = false, modelState = {}, mpoll = null;
+$("modelbtn").onclick = () => { modalOpen = true; $("modal").classList.add("open"); refreshModels(); mpoll = setInterval(refreshModels, 1000); };
+$("closeb").onclick = closeModal;
+$("modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+function closeModal() { modalOpen = false; $("modal").classList.remove("open"); clearInterval(mpoll); }
+const nice = id => id.replace(/-/g, " ").replace(/\b(vl|it)\b/gi, m => m.toUpperCase()).replace(/\bqwen\b/i, "Qwen").replace(/\bgemma\b/i, "Gemma");
+const dash = (v, u = "") => v == null ? "–" : v + u;
+async function refreshModels() {
+  let d; try { d = await (await fetch("/api/models")).json(); } catch (e) { return; }
+  const sw = d.switching;
+  $("mbanner").innerHTML = sw ? `<div class="banner">Loading ${nice(sw)}… ${d.switch_elapsed ?? 0} s. Questions are paused until it is ready.</div>`
+    : d.error ? `<div class="banner err">Switch failed: ${esc(d.error)}</div>` : "";
+  $("mlist").innerHTML = d.models.map(m => {
+    const s = m.stats;
+    let action;
+    if (m.active) action = '<div class="badge2">LOADED</div>';
+    else if (m.missing.length) action = `<div class="note" style="margin:0">not downloaded: <code>fetch-models.sh</code></div>`;
+    else if (m.restart_needed) action = `<div class="note" style="margin:0">new preset: <code>docker compose restart vlm</code></div>`;
+    else action = `<button data-id="${m.id}" ${sw || asking ? "disabled" : ""}>Load</button>`;
+    const fit = m.fits ? `<small class="fit-${m.fits}">${m.fits === "ok" ? "should fit" : m.fits === "tight" ? "tight fit" : "probably does not fit"} (~${m.need_gtt_gib} GiB GPU, ${m.need_ram_gib} GiB RAM)</small>` : "";
+    const mem = s.gtt_gib != null ? `${s.gtt_gib} GiB<small>measured</small>` : `~${m.est_gib.toFixed(1)} GiB<small>estimate</small>`;
+    return `<div class="mrow${m.active ? " active" : ""}">
+      <div class="nm">${esc(nice(m.id))}<small>${m.missing.length ? "not downloaded, ~" + m.size_gib.toFixed(1) + " GiB" : m.size_gib.toFixed(1) + " GiB files"} · ctx ${m.ctx} · ${m.parallel} slot${m.parallel > 1 ? "s" : ""}${m.img_tokens ? " · " + m.img_tokens + " img tok" : ""}</small>${fit}</div>
+      <div class="c">${mem}</div>
+      <div class="c">${dash(s.ttft_s, " s")}<small>${s.questions} question${s.questions === 1 ? "" : "s"}</small></div>
+      <div class="c">${dash(s.tok_s)}<small>tok/s</small></div>
+      <div class="c">${dash(s.det_ms, " ms")}<small>GPU busy ${dash(s.gpu_busy != null ? Math.round(s.gpu_busy) : null, " %")}</small></div>
+      <div class="c">${dash(s.skipped, "/s")}<small>frames</small></div>
+      <div class="c">${s.genai}<small>descriptions</small></div>
+      <div>${action}</div></div>`;
+  }).join("");
+  document.querySelectorAll("#mlist button[data-id]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const r = await fetch("/api/models/load", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({model: b.dataset.id})});
+    if (r.status === 409) $("mbanner").innerHTML = '<div class="banner err">Busy: a question is being answered. Try again in a moment.</div>';
+    else refreshModels();
+  });
+}
+function renderModelChip(m) {
+  modelState = m || {};
+  const sw = modelState.switching;
+  $("modelname").innerHTML = sw ? `loading ${esc(nice(sw))}…` : modelState.active ? esc(nice(modelState.active)) : (modelState.router_up === false ? "not reachable" : "none loaded");
+  $("modelbtn").classList.toggle("busy", !!sw);
+  setBusy(asking || !!sw || !modelState.active);
+}
 
 // ---------- meters
 const hist = {};
@@ -241,6 +326,7 @@ function setTile(k, v, s, pct) {
   $("b-" + k).style.width = Math.max(0, Math.min(100, pct || 0)) + "%";
 }
 function render(d) {
+  if (d.model) renderModelChip(d.model);
   if (d.gpu) { setTile("gpu", `${d.gpu.busy ?? "–"}<small> %</small>`, `peak ${d.gpu.peak ?? "–"} % · all engines share it`, d.gpu.busy); push("gpu", d.gpu.busy, 100); }
   if (d.detect) { setTile("det", `${Math.round(d.detect.fps)}<small> /s</small>`, `${f1(d.detect.ms)} ms each · skipped ${d.detect.skipped_fps}/s`, d.detect.duty); push("det", d.detect.fps); }
   if (d.vlm) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download VLM models into ./models with curl (llama.cpp's -hf download is unreliable here).
-# Usage: scripts/fetch-models.sh [qwen|gemma|all]   (default: qwen)
+# Usage: scripts/fetch-models.sh [qwen|gemma|qwen7b|all]   (default: qwen; "all" = qwen + gemma, qwen7b is 5.5 GB and only on request)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p models
@@ -23,7 +23,11 @@ case "${1:-qwen}" in
     get ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf
     get ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf mmproj-gemma-3-4b-it-f16.gguf
     ;;&
+  qwen7b)
+    get ggml-org/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf
+    get ggml-org/Qwen2.5-VL-7B-Instruct-GGUF mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf
+    ;;
   qwen|gemma|all) ;;
-  *) echo "usage: $0 [qwen|gemma|all]"; exit 1 ;;
+  *) echo "usage: $0 [qwen|gemma|qwen7b|all]"; exit 1 ;;
 esac
 ls -lh models

@@ -12,6 +12,7 @@ services:
       - "${RENDER_GID:-990}"
     volumes:
       - ./models:/models:ro
+      - ./vlm:/config:ro
     ports:
       - "${VLM_PORT:-8080}:8080"
     command:
@@ -19,22 +20,12 @@ services:
       - 0.0.0.0
       - --port
       - "8080"
-      - -m
-      - /models/${VLM_MODEL_FILE}
-      - --mmproj
-      - /models/${VLM_MMPROJ_FILE}
-      - --alias
-      - ${VLM_ALIAS:-vlm}
-      - -ngl
-      - "99"
-      - -c
-      - "${VLM_CTX:-8192}"
-      - -np
-      - "${VLM_PARALLEL:-2}"
-      - --image-max-tokens
-      - "${VLM_IMAGE_MAX_TOKENS:-512}"
-      - -fa
-      - "on"
+      # router mode: models and their settings come from vlm/models.ini, one loaded at a time;
+      # askcam-ui switches the loaded model through the router API
+      - --models-preset
+      - /config/models.ini
+      - --models-max
+      - "1"
       - --metrics
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]
@@ -66,6 +57,7 @@ services:
     restart: unless-stopped
     depends_on:
       - vlm
+      - askcam-ui
     environment:
       - VLM_GATE_CONCURRENCY=${VLM_GATE_CONCURRENCY:-1}
       - VLM_GATE_RATE=${VLM_GATE_RATE:-8r/m}
@@ -119,10 +111,12 @@ services:
       - FRIGATE_URL=http://frigate:5000
       # questions go straight to the VLM; only Frigate's GenAI goes through vlm-gate
       - VLM_URL=http://vlm:8080
-      - VLM_ALIAS=${VLM_ALIAS:-vlm}
       - HOST_SYS=/host/sys
     volumes:
       # read-only: gpu_busy_percent, mem_info_gtt_*, hwmon power/temperature
       - /sys:/host/sys:ro
+      # model presets (read-only) and model files (only to show their size / whether they are downloaded)
+      - ./vlm:/config:ro
+      - ./models:/models:ro
     ports:
       - "${UI_PORT:-8000}:8000"

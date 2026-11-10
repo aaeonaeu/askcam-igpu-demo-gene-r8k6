@@ -7,21 +7,25 @@
 """
 import asyncio
 import base64
+import configparser
 import glob
 import json
 import os
 import re
+import statistics
 import time
+from collections import deque
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 FRIGATE = os.environ.get("FRIGATE_URL", "http://frigate:5000")
 VLM = os.environ.get("VLM_URL", "http://vlm:8080")
-VLM_MODEL = os.environ.get("VLM_ALIAS", "vlm")
+MODELS_INI = os.environ.get("MODELS_INI", "/config/models.ini")
+MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 SYS = os.environ.get("HOST_SYS", "/host/sys")
 CAMERAS = [c.split(":", 1) for c in os.environ.get(
     "CAMERAS", "cam1:Crosswalk,cam2:Warehouse,cam3:Road junction").split(",")]
@@ -41,8 +45,12 @@ SYSTEM_PROMPT = (
 
 app = FastAPI(title="askcam-ui")
 http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
-state: dict = {"t": 0}
+state: dict = {"t": 0, "model": {"active": None, "switching": None}}
 ask_lock = asyncio.Lock()
+
+
+def active_model():
+    return state["model"].get("active")
 
 
 # ---------------------------------------------------------------- meters
@@ -92,8 +100,13 @@ async def sysfs_sampler():
         v = read(f"{GPU_DEV}/gpu_busy_percent") if GPU_DEV else None
         if v is not None:
             gpu.append(int(v))
+        act = active_model()
+        if state["model"].get("switching"):
+            act = None
         try:
-            r = await http.get(f"{VLM}/slots", timeout=1.0)
+            if not act:
+                raise RuntimeError("no model loaded")
+            r = await http.get(f"{VLM}/slots", params={"model": act}, timeout=1.0)
             slots = r.json()
             vlm_act.append(100 if any(s.get("is_processing") for s in slots) else 0)
         except Exception:
@@ -105,6 +118,8 @@ async def sysfs_sampler():
         s = {}
         # iGPU
         s["gpu"] = {"busy": round(sum(gpu) / len(gpu)) if gpu else None, "peak": max(gpu) if gpu else None}
+        if gpu and act:
+            mstats(act)["gpu_busy"].append(sum(gpu) / len(gpu))
         gpu = []
         used, total = read(f"{GPU_DEV}/mem_info_gtt_used"), read(f"{GPU_DEV}/mem_info_gtt_total")
         if used and total:
@@ -113,7 +128,9 @@ async def sysfs_sampler():
         vlm = {"active": round(sum(vlm_act) / len(vlm_act)) if vlm_act else 0}
         vlm_act = []
         try:
-            txt = (await http.get(f"{VLM}/metrics", timeout=1.0)).text
+            if not act:
+                raise RuntimeError("no model loaded")
+            txt = (await http.get(f"{VLM}/metrics", params={"model": act}, timeout=1.0)).text
             tok = float(re.search(r"^llamacpp:tokens_predicted_total (\S+)", txt, re.M).group(1))
             ptok = float(re.search(r"^llamacpp:prompt_tokens_total (\S+)", txt, re.M).group(1))
             proc = int(float(re.search(r"^llamacpp:requests_processing (\S+)", txt, re.M).group(1)))
@@ -159,6 +176,11 @@ async def frigate_sampler():
                 "duty": round(min(100.0, 100 * fps * avg_ms / 1000 / max(1, len(dets))), 0),
                 "skipped_fps": round(sum(c.get("skipped_fps", 0) for c in cams.values()), 2),
             }
+            act = active_model()
+            if act and not state["model"].get("switching"):
+                ms_ = mstats(act)
+                ms_["det_ms"].append(avg_ms)
+                ms_["skipped"].append(state["detect"]["skipped_fps"])
             state["decode"] = {
                 "streams": len(cams),
                 "fps": round(len(cams) * SRC_FPS),
@@ -175,6 +197,7 @@ async def frigate_sampler():
 async def startup():
     asyncio.create_task(sysfs_sampler())
     asyncio.create_task(frigate_sampler())
+    asyncio.create_task(model_sampler())
 
 
 @app.get("/api/meters/stream")
@@ -184,6 +207,200 @@ async def meters_stream():
             yield f"data: {json.dumps(state)}\n\n"
             await asyncio.sleep(1.0)
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------- models (llama.cpp router)
+_mstats: dict = {}
+
+
+def mstats(name):
+    """Per-model measurements collected while the model is loaded (in memory, reset when askcam-ui restarts)."""
+    return _mstats.setdefault(name, {"questions": [], "det_ms": deque(maxlen=900), "skipped": deque(maxlen=900),
+                                     "gpu_busy": deque(maxlen=900), "genai": 0, "load_s": None, "gtt_gib": None})
+
+
+def load_presets():
+    """models.ini (llama.cpp preset file) -> {name: info}; also checks that the GGUF files are present."""
+    cp = configparser.ConfigParser(interpolation=None, allow_no_value=True)
+    cp.optionxform = str
+    try:
+        cp.read(MODELS_INI)
+    except configparser.Error:
+        return {}
+    base = dict(cp["*"]) if cp.has_section("*") else {}
+    hints, cur = {}, None                      # "; size-gib: N" comments (router ignores them)
+    for line in open(MODELS_INI):
+        m = re.match(r"\[(.+)\]", line.strip())
+        if m:
+            cur = m.group(1)
+        m = re.match(r";\s*size-gib:\s*([\d.]+)", line.strip())
+        if m and cur:
+            hints[cur] = float(m.group(1))
+    out = {}
+    for name in cp.sections():
+        if name == "*":
+            continue
+        c = {**base, **dict(cp[name])}
+        size, missing = 0, []
+        for key in ("model", "mmproj"):
+            path = c.get(key)
+            if not path:
+                continue
+            local = os.path.join(MODELS_DIR, os.path.basename(path))
+            if os.path.exists(local):
+                size += os.path.getsize(local)
+            else:
+                missing.append(os.path.basename(path))
+        if not size and name in hints:
+            size = hints[name] * 2**30
+        out[name] = {
+            "ctx": int(c.get("ctx-size", 4096)), "parallel": int(c.get("parallel", 1)),
+            "img_tokens": int(c.get("image-max-tokens", 0)) or None,
+            "size_gib": size / 2**30, "missing": missing, "hint": bool(missing and name in hints),
+            # GPU memory estimate = weights + projector + KV cache / compute buffers (~1 GiB measured for the 3B)
+            "est_gib": size / 2**30 + 1.0,
+        }
+    return out
+
+
+async def router_status():
+    r = await http.get(f"{VLM}/models", timeout=3.0)
+    return {m["id"]: m for m in r.json().get("data", [])}
+
+
+async def model_sampler():
+    while True:
+        try:
+            st = await router_status()
+            loaded = next((k for k, m in st.items() if m["status"]["value"] == "loaded"), None)
+            loading = next((k for k, m in st.items() if m["status"]["value"] == "loading"), None)
+            state["model"].update(active=loaded, loading=loading, router_up=True)
+        except Exception:
+            state["model"].update(active=None, loading=None, router_up=False)
+        await asyncio.sleep(1.0)
+
+
+_switch = {"task": None, "error": None, "started": None}
+
+
+async def do_switch(name):
+    prev = active_model()
+    state["model"]["switching"] = name
+    _switch.update(error=None, started=time.time())
+    try:
+        st = await router_status()
+        for k, m in st.items():
+            if k != name and m["status"]["value"] in ("loaded", "loading"):
+                await http.post(f"{VLM}/models/unload", json={"model": k}, timeout=60.0)
+        for _ in range(60):                       # wait until the old model is really gone (frees its GPU memory)
+            st = await router_status()
+            if not any(m["status"]["value"] in ("loaded", "loading") for k, m in st.items() if k != name):
+                break
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
+        before = float(read(f"{GPU_DEV}/mem_info_gtt_used", 0))
+        t0 = time.time()
+        r = await http.post(f"{VLM}/models/load", json={"model": name}, timeout=30.0)
+        if r.status_code >= 400:
+            raise RuntimeError(f"router refused the load: {r.text[:200]}")
+        for _ in range(240):
+            st = await router_status()
+            v = st.get(name, {}).get("status", {}).get("value")
+            if v == "loaded":
+                break
+            if v in ("unloaded", "failed") and time.time() - t0 > 5:
+                raise RuntimeError("the model failed to load (see `docker logs askcam-vlm`)")
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError("timed out waiting for the model to load")
+        ms_ = mstats(name)
+        ms_["load_s"] = round(time.time() - t0, 1)
+        await asyncio.sleep(2.0)
+        ms_["gtt_gib"] = round((float(read(f"{GPU_DEV}/mem_info_gtt_used", 0)) - before) / 2**30, 2)
+        for k in ("det_ms", "skipped", "gpu_busy"):
+            ms_[k].clear()                        # measure only while this model is loaded
+    except Exception as e:
+        _switch["error"] = str(e)
+        if prev and prev != name:                  # best effort: bring the previous model back
+            try:
+                await http.post(f"{VLM}/models/load", json={"model": prev}, timeout=30.0)
+            except Exception:
+                pass
+    finally:
+        state["model"]["switching"] = None
+
+
+def med(v):
+    return round(statistics.median(v), 1) if v else None
+
+
+def avg(v):
+    return round(sum(v) / len(v), 2) if v else None
+
+
+@app.get("/api/models")
+async def models():
+    pre = load_presets()
+    act = active_model()
+    sw = state["model"].get("switching")
+    ram, gtt = state.get("ram"), state.get("gtt")
+    try:
+        known = set(await router_status())
+    except Exception:
+        known = set(pre)
+    out = []
+    for name, p in pre.items():
+        ms_ = mstats(name)
+        q = ms_["questions"]
+        fits = None
+        if ram and gtt and name != act:
+            others_gtt = gtt["used_gib"] - (pre[act]["est_gib"] if act in pre else 0)
+            others_ram = ram["used_gib"] - (pre[act]["est_gib"] if act in pre else 0)
+            need_gtt, need_ram = others_gtt + p["est_gib"], others_ram + p["est_gib"]
+            worst = max(need_gtt / gtt["total_gib"], need_ram / ram["total_gib"])
+            fits = "no" if worst > 1.0 else ("tight" if worst > 0.9 else "ok")
+            p["need_gtt_gib"], p["need_ram_gib"] = round(need_gtt, 1), round(need_ram, 1)
+        out.append({
+            "id": name, **p, "active": name == act, "restart_needed": name not in known, "loading": name == sw, "fits": fits,
+            "stats": {"questions": len(q), "ttft_s": med([x[0] for x in q]), "tok_s": med([x[1] for x in q]),
+                      "det_ms": avg(ms_["det_ms"]), "skipped": avg(ms_["skipped"]), "gpu_busy": avg(ms_["gpu_busy"]),
+                      "genai": ms_["genai"], "load_s": ms_["load_s"], "gtt_gib": ms_["gtt_gib"]},
+        })
+    return {"models": out, "active": act, "switching": sw, "error": _switch["error"],
+            "switch_elapsed": round(time.time() - _switch["started"]) if sw and _switch["started"] else None,
+            "gtt": gtt, "ram": ram}
+
+
+class Load(BaseModel):
+    model: str
+
+
+@app.post("/api/models/load")
+async def models_load(body: Load):
+    pre = load_presets()
+    if body.model not in pre:
+        raise HTTPException(404, "unknown model")
+    if pre[body.model]["missing"]:
+        raise HTTPException(400, "model files are not downloaded: " + ", ".join(pre[body.model]["missing"]))
+    if state["model"].get("switching") or ask_lock.locked():
+        return JSONResponse({"error": "busy"}, status_code=409)
+    if body.model == active_model():
+        return {"ok": True, "already": True}
+    _switch["task"] = asyncio.create_task(do_switch(body.model))
+    return {"ok": True}
+
+
+@app.post("/llm/v1/chat/completions")
+async def llm_proxy(request: Request):
+    """Frigate GenAI (via vlm-gate) calls this with its fixed model name; forward to whichever model is loaded."""
+    act = active_model()
+    if not act or state["model"].get("switching"):
+        return JSONResponse({"error": {"message": "model is loading, try again", "code": 503}}, status_code=503)
+    body = await request.json()
+    body["model"] = act
+    mstats(act)["genai"] += 1
+    r = await http.post(f"{VLM}/v1/chat/completions", json=body, timeout=httpx.Timeout(10.0, read=120.0))
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "application/json"))
 
 
 # ---------------------------------------------------------------- misc
@@ -261,6 +478,9 @@ async def ask(body: Ask):
         raise HTTPException(404, "unknown camera")
     if ask_lock.locked():
         return JSONResponse({"error": "busy"}, status_code=429)
+    model = active_model()
+    if state["model"].get("switching") or not model:
+        return JSONResponse({"error": "model is not ready"}, status_code=503)
 
     async def gen():
         async with ask_lock:
@@ -276,7 +496,7 @@ async def ask(body: Ask):
             b64 = base64.b64encode(jpg).decode()
             yield sse({"type": "frame", "b64": b64, "grab_ms": round(grab_ms)})
             payload = {
-                "model": VLM_MODEL, "stream": True, "max_tokens": MAX_TOKENS, "temperature": 0.2,
+                "model": model, "stream": True, "max_tokens": MAX_TOKENS, "temperature": 0.2,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": [
@@ -313,6 +533,8 @@ async def ask(body: Ask):
             if timings:
                 done["tok_s"] = round(timings.get("predicted_per_second", 0), 1)
                 done["prompt_ms"] = round(timings.get("prompt_ms", 0))
+            if first:
+                mstats(model)["questions"].append((first, done.get("tok_s", 0)))
             yield sse(done)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})

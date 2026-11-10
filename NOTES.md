@@ -221,3 +221,25 @@ Detection never stops, but it is not completely free: frames are skipped in burs
 - The UI port is unauthenticated and the page proxies Frigate read-only (live, thumbnails, event list). Fine for a booth LAN, do not expose it.
 - Answers are from a 3B model: counts and "without helmet" style judgements are sometimes wrong (e.g. it called a cyclist helmet-less). Presets are intentionally generic.
 - Frigate described-percentage is still low by design (step 4), so the feed updates every ~10 s, not every object.
+
+### Step 5b: switch the language model from the UI
+
+The header button **Model: ...** opens a table of models (from `vlm/models.ini`). One click on **Load** unloads the current model and loads the chosen one, with all cameras and detection still running; the table shows, per model, what it costs and what it gives, measured while that model was loaded.
+
+How it works
+- `vlm` now runs llama.cpp in **router mode** (`--models-preset /config/models.ini --models-max 1`). Each `[section]` of `vlm/models.ini` is a model with its own settings (context, slots, image tokens). Router API: `GET /models`, `POST /models/load|unload`.
+- Two router quirks that shaped the design: (1) every request must name a model that exists, so Frigate's fixed `model: vlm` fails; (2) **any** request naming an unloaded model (even `/slots?model=...&autoload=false`) loads it. So `vlm-gate` now forwards chat requests to `askcam-ui` (`/llm/v1/chat/completions`), which rewrites the model name to the loaded one and returns 503 during a switch; the UI also stops polling the VLM while switching. Duplicate aliases are rejected by the router, so one shared alias was not an option.
+- `askcam-ui` reads `models.ini` (mounted read-only) only for display: file sizes, settings, and a fit warning (estimate = file size + 1 GiB vs. GPU shared memory and RAM left; "should fit / tight fit / probably does not fit"). A comment line `; size-gib: N` in a section lets the UI judge the fit before the files are downloaded.
+- Changes to `models.ini` need `docker compose restart vlm` (the router reads it at start); the UI shows "new preset: restart vlm" until then. Changes to `vlm-gate/default.conf.template` need `docker compose up -d --force-recreate vlm-gate`.
+- If a load fails the previous model is reloaded and the error is shown in the dialog.
+- Per-model numbers are kept in askcam-ui memory (reset when that container restarts).
+
+Presets in `vlm/models.ini`: `qwen2.5-vl-3b` (default), `qwen2.5-vl-3b-lite` (same files, 256 image tokens), `gemma-3-4b` (`scripts/fetch-models.sh gemma`, 3.1 GiB) and `qwen2.5-vl-7b` (`scripts/fetch-models.sh qwen7b`, 5.2 GiB, context 4096, 1 slot). Gemma and the 7B are **not downloaded and not tested**; for the 7B the UI estimates ~6.5 GiB GPU / ~13-14 GiB RAM and shows "tight fit".
+
+First measurements (same cameras, GenAI running, 9 and 6 questions):
+| Model | GPU memory growth | First word (median) | Speed | Switch time |
+|---|---|---|---|---|
+| qwen2.5-vl-3b (512 image tokens) | 3.22 GiB | 3.2 s | 23.2 tok/s | 5.5 s (files cached) |
+| qwen2.5-vl-3b-lite (256 image tokens) | 3.17 GiB | **1.8 s** | 24.6 tok/s | 4.0 s |
+
+So halving the image tokens cuts first word by ~1.4 s at no memory cost; what it costs in answer detail has not been judged systematically. Detector time and skipped frames stayed in the normal range for both.

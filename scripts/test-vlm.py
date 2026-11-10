@@ -12,10 +12,17 @@ ap.add_argument("--runs", type=int, default=3)
 ap.add_argument("--max-tokens", type=int, default=100)
 a = ap.parse_args()
 
+def loaded_model(url):  # llama.cpp router: requests must name the loaded model
+    try:
+        d = json.load(urllib.request.urlopen(url + "/models", timeout=5))["data"]
+        return next(m["id"] for m in d if m["status"]["value"] == "loaded")
+    except Exception:
+        return "vlm"
+
 data = base64.b64encode(open(a.image, "rb").read()).decode()
 mime = mimetypes.guess_type(a.image)[0] or "image/jpeg"
 body = json.dumps({
-    "model": "vlm", "max_tokens": a.max_tokens, "temperature": 0.2, "cache_prompt": False,
+    "model": loaded_model(a.url), "max_tokens": a.max_tokens, "temperature": 0.2, "cache_prompt": False,
     "messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}},
         {"type": "text", "text": a.question}]}],
