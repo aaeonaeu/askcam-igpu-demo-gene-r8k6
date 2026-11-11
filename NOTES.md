@@ -284,3 +284,21 @@ Recommendation for the booth: keep **qwen2.5-vl-3b** as the default; use the **7
   - **0 GPU resets / MES / amdkfd errors** with `amdgpu.cwsr_enable=0`.
   - **Memory leak confirmed and contained:** `frigate.embeddings_manager` grew ~0.1 GiB/min (0.5 -> 2.6 GiB) and was killed by the container's 5 GB limit twice (17:26 and 17:47, about every 21 min); Frigate's watchdog restarted it within 1-2 s and descriptions resumed. No other container restarted, no host-wide OOM. The two "kernel errors" counted by the script are exactly these two cgroup kills. RAM used ranged 8.5-13.3 GiB, swap up to 1.6 GiB.
   - Root cause of the leak is still unknown (Frigate 0.18.2); worth reporting upstream or profiling with `FRIGATE_MEMRAY_MODULES=frigate.embeddings`. For a long booth day it is harmless but Frigate logs two warnings per cycle.
+
+## Step 7: Frigate embeddings memory leak, root cause and local fix (done 2026-11-11)
+
+- **Root cause** (Frigate 0.18.2, `frigate.embeddings_manager`, GenAI object descriptions on):
+  - `EmbeddingMaintainer.run()` blocks on the detection-frame subscriber (`check_for_update()` with no timeout), so it loops once per detection frame: exactly 12.0 loops/s with 3 cameras at 4 fps.
+  - It read one `event/update` per loop while 34.3/s arrive on these clips. The backlog grew ~0.7 s per second (84 s after 2 min).
+  - `event/finalized` is on its own queue and is fully drained every loop, so an object's cleanup ran before its queued updates were read. Each late update re-created `ObjectDescriptionProcessor.tracked_events[id]` (up to 10 thumbnails, 500 px tall, JPEG quality 100, ~176 kB each) and nothing deleted it again.
+- **Evidence** (`logs/memleak/`, not in git): memray showed 593 MB live (82 % of the process) in `create_thumbnail` <- `__handle_frame_update` after 6 min, 3368 thumbnails; a read-only replay of the loop's read pattern on the live bus found 75 % of the updates it read were for objects that had already ended. 8.7 thumbnails/s x 176 kB = 1.5 MB/s, matching the measured 0.1 GiB/min.
+- **Fix** (`frigate/patches/`, mounted read-only over the pinned image by `compose.yml`; details in `frigate/patches/README.md`):
+  - `maintainer.py`: `_process_updates()` drains all pending updates per loop (cap 200) and runs again just before `_process_finalized()`.
+  - `object_descriptions.py`: remembers the last 2048 ended event ids and ignores updates for them.
+- **Verified** (`scripts/soak.py 30 --tag leakfix`, 12:11-12:41, 3B model, all cameras, GenAI on, a question every 30 s; `logs/step6/soak-leakfix.*`):
+  - `frigate.embeddings_manager` RSS 0.36 -> 0.37 GiB, flat for 30 min (before: +0.1 GiB/min, killed about every 21 min). Same process the whole run, 0 container restarts, 0 kernel OOM lines.
+  - 172 descriptions in 30 min (counter 569 -> 741), the same rate as the step 6 soak (337 in 60 min).
+  - 60/60 questions, first word p50 3.2 s, p95 3.6 s; detector avg 10.8 ms; skipped 0.04/s: unchanged.
+  - The process now handles every update instead of a third of them and used about half a CPU core on average (no "before" figure was recorded).
+- **Kept:** the 5 GB container limit, as a backstop only.
+- **Limits:** the patch files are full copies of two Frigate 0.18.2 files, so they must be dropped or redone when the Frigate image changes. Upstream's `dev` branch still has the one-update-per-loop structure (read from source, not run). Not reported upstream yet. The offline package `askcam-demo-20261111.tar.zst` was built before this fix.

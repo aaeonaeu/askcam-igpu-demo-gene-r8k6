@@ -1,0 +1,98 @@
+--- a/frigate/embeddings/maintainer.py
++++ b/frigate/embeddings/maintainer.py
+@@ -78,6 +78,9 @@
+ 
+ MAX_THUMBNAILS = 10
+ 
++# askcam patch: upper bound of event updates handled per maintainer loop iteration
++MAX_UPDATES_PER_LOOP = 200
++
+ GENAI_UPDATE_TOPICS = frozenset(
+     {
+         CameraConfigUpdateEnum.add.name,
+@@ -335,6 +338,10 @@
+             self._process_frame_updates()
+             self._process_deferred_results()
+             self._expire_dedicated_lpr()
++            # askcam patch: _process_frame_updates blocks until the next detection
++            # frame, so updates queued meanwhile must be read before the matching
++            # "finalized" messages, or they are handled after the event's cleanup.
++            self._process_updates()
+             self._process_finalized()
+             self._process_event_metadata()
+ 
+@@ -497,12 +504,24 @@
+         self.embeddings_responder.check_for_request(_handle_request)
+ 
+     def _process_updates(self) -> None:
+-        """Process event updates"""
+-        update = self.event_subscriber.check_for_update()
++        """Process event updates
+ 
+-        if update is None:
+-            return
++        askcam patch: upstream reads ONE update per loop iteration, and the loop
++        is paced by the blocking detection read in _process_frame_updates (one
++        iteration per detection frame). With more object updates than detection
++        frames the queue grows without bound. Drain it instead; the cap only
++        keeps the rest of the loop responsive during a burst.
++        """
++        for _ in range(MAX_UPDATES_PER_LOOP):
++            update = self.event_subscriber.check_for_update()
++
++            if update is None:
++                return
++
++            self._process_update(update)
+ 
++    def _process_update(self, update: tuple) -> None:
++        """Process a single event update"""
+         source_type, event_type, camera, frame_name, data = update
+ 
+         logger.debug(
+--- a/frigate/data_processing/post/object_descriptions.py
++++ b/frigate/data_processing/post/object_descriptions.py
+@@ -33,6 +33,9 @@
+ 
+ MAX_THUMBNAILS = 10
+ 
++# askcam patch: how many recently ended event ids to remember (see cleanup_event)
++MAX_ENDED_EVENTS = 2048
++
+ 
+ class ObjectDescriptionProcessor(PostProcessorApi):
+     def __init__(
+@@ -53,6 +56,8 @@
+         self.semantic_trigger_processor = semantic_trigger_processor
+         self.tracked_events: dict[str, list[Any]] = {}
+         self.early_request_sent: dict[str, bool] = {}
++        # askcam patch: ids of events that already ended, oldest first (bounded)
++        self.ended_events: dict[str, None] = {}
+         self.object_desc_speed = InferenceSpeed(self.metrics.object_desc_speed)
+         self.object_desc_dps = EventsPerSecond()
+         self.object_desc_dps.start()
+@@ -66,6 +71,12 @@
+         if not camera_config.objects.genai.enabled:
+             return
+ 
++        # askcam patch: an update can be read after the event's "finalized" message
++        # (separate queues). Storing its thumbnail would re-create an entry that
++        # nothing cleans up again, so drop it.
++        if data["id"] in self.ended_events:
++            return
++
+         # no need to save our own thumbnails if the object has become stationary
+         if not data["stationary"]:
+             if data["id"] not in self.tracked_events:
+@@ -240,6 +251,11 @@
+         if event_id in self.early_request_sent:
+             del self.early_request_sent[event_id]
+ 
++        # askcam patch: remember the id so late updates for it are ignored
++        self.ended_events[event_id] = None
++        while len(self.ended_events) > MAX_ENDED_EVENTS:
++            del self.ended_events[next(iter(self.ended_events))]
++
+     def _read_and_crop_snapshot(self, event: Event) -> bytes | None:
+         """Read, decode, and crop the snapshot image."""
+ 

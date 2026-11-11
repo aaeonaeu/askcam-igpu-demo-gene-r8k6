@@ -38,4 +38,4 @@ Open **Model**: "Same chip, different brain. The 7B model answers better but nee
 ## If something goes wrong
 - No live image: `docker compose restart frigate` (60-90 s).
 - Answers "model is not ready": a model switch is still running, wait 10 s.
-- Descriptions missing for a while: Frigate restarts its description process now and then (known memory leak), it recovers by itself.
+- Descriptions missing for a while: the language model is busy with questions (Frigate's requests are rate-limited), or Frigate restarted its description process; both recover by themselves.

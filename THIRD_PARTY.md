@@ -1,6 +1,6 @@
 # Third-party components and their licences
 
-The MIT licence in `LICENSE` covers only the files in this repository (compose files, configs, scripts, `askcam-ui`, docs). The repository contains **no** third-party binaries, container images, models or video clips; `scripts/fetch-*.sh` and `docker compose` download them from their original sources, and each keeps its own licence. Check them before any use beyond an internal demo, and especially before redistributing an offline bundle (`scripts/bundle-offline.sh` packs images, models and clips together).
+The MIT licence in `LICENSE` covers only the files in this repository (compose files, configs, scripts, `askcam-ui`, docs). The one exception is `frigate/patches/`: two source files of Frigate 0.18.2 with a local fix, under Frigate's MIT licence (`frigate/patches/LICENSE.frigate`). The repository contains **no** third-party binaries, container images, models or video clips; `scripts/fetch-*.sh` and `docker compose` download them from their original sources, and each keeps its own licence. Check them before any use beyond an internal demo, and especially before redistributing an offline bundle (`scripts/bundle-offline.sh` packs images, models and clips together).
 
 | Component | Used for | Licence (as checked / to my knowledge) |
 |---|---|---|
