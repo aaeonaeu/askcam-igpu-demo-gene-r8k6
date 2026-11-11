@@ -17,5 +17,7 @@ frigate/media/
 *.tar
 *.tar.gz
 *.tgz
+*.zst
+askcam-demo-*/
 # test logs
 logs/
