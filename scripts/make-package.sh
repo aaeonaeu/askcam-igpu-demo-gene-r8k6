@@ -23,4 +23,4 @@ T
 ( cd "$D" && sha256sum setup.sh debs/*.deb > SHA256SUMS )
 echo "== compressing (zstd, all cores)"
 tar -I 'zstd -T0 -6' -cf "$OUT" "$D"; rm -rf "$D"
-sha256sum "$OUT" | tee "$OUT.sha256"; ls -lh "$OUT"
+sha256sum "$OUT" | tee "$OUT.sha256"; ls -lh "$OUT"   # relative name, verify with: sha256sum -c $OUT.sha256

@@ -24,4 +24,4 @@ docker run --rm -v "$PWD/frigate/config/model_cache:/src:ro" -v "$W/payload/frig
   --entrypoint sh "${NGINX_IMAGE:-nginx:1.29-alpine}" -c "cp -a /src /dst/model_cache && chown -R $(id -u):$(id -g) /dst"
 cp .env "$W/payload/env.used"   # reference only: GIDs of the build host
 echo "== tar"; tar -C "$W" -cf "$OUT" askcam images.tar payload
-sha256sum "$OUT" | tee "$OUT.sha256"; ls -lh "$OUT"
+( cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" | tee "$(basename "$OUT").sha256" ); ls -lh "$OUT"
