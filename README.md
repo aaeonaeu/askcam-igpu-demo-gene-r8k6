@@ -66,3 +66,6 @@ Everything host-specific is in `.env` (see `.env.example`): group IDs, ports, pi
 
 ## Layout
 `compose.yml`, `.env.example`, `Makefile` · `askcam-ui/` (FastAPI + one static page) · `vlm/models.ini` · `vlm-gate/` · `cams/` · `frigate/config/config.yml` · `scripts/` (fetch, bundle/restore, tests, soak) · `NOTES.md` (all measurements) · `PLAN.md` · `DEMO.md` (3-minute booth script).
+
+## Licence
+The code and configuration in this repository are MIT-licensed (`LICENSE`). The models, container images and video clips it downloads are **not** part of it and have their own licences, some non-commercial (the default Qwen2.5-VL-3B) or copyleft (YOLO11, AGPL-3.0): see `THIRD_PARTY.md` before using beyond a demo.
