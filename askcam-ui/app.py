@@ -36,6 +36,11 @@ MAX_TOKENS = int(os.environ.get("ASK_MAX_TOKENS", "160"))
 LIVE_FPS = int(os.environ.get("LIVE_FPS", "6"))
 LIVE_HEIGHT = int(os.environ.get("LIVE_HEIGHT", "540"))
 FRIGATE_STATS_EVERY = float(os.environ.get("FRIGATE_STATS_EVERY", "2"))
+# Safeguards (guard_sampler). A value of 0 switches that safeguard off.
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "")              # empty: the load-on-startup preset of models.ini
+GUARD_NO_MODEL_S = float(os.environ.get("GUARD_NO_MODEL_S", "60"))           # reload the default after this long with no model
+GUARD_MIN_HEADROOM_GIB = float(os.environ.get("GUARD_MIN_HEADROOM_GIB", "1.5"))  # free RAM + free swap below this ...
+GUARD_LOW_MEM_S = float(os.environ.get("GUARD_LOW_MEM_S", "20"))             # ... for this long: back to the default model
 
 SYSTEM_PROMPT = (
     "You are the vision assistant of a camera system. You are given one still frame from a camera. "
@@ -198,6 +203,7 @@ async def startup():
     asyncio.create_task(sysfs_sampler())
     asyncio.create_task(frigate_sampler())
     asyncio.create_task(model_sampler())
+    asyncio.create_task(guard_sampler())
 
 
 @app.get("/api/meters/stream")
@@ -256,6 +262,7 @@ def load_presets():
         out[name] = {
             "ctx": int(c.get("ctx-size", 4096)), "parallel": int(c.get("parallel", 1)),
             "img_tokens": int(c.get("image-max-tokens", 0)) or None,
+            "startup": str(c.get("load-on-startup", "")).lower() in ("true", "1", "on", "yes"),
             "size_gib": size / 2**30, "missing": missing, "hint": bool(missing and name in hints),
             # GPU memory estimate = weights + projector + KV cache / compute buffers (~1 GiB measured for the 3B)
             "est_gib": size / 2**30 + 1.0,
@@ -283,7 +290,7 @@ async def model_sampler():
 _switch = {"task": None, "error": None, "started": None}
 
 
-async def do_switch(name):
+async def do_switch(name, restore_prev=True):
     prev = active_model()
     state["model"]["switching"] = name
     _switch.update(error=None, started=time.time())
@@ -321,13 +328,70 @@ async def do_switch(name):
             ms_[k].clear()                        # measure only while this model is loaded
     except Exception as e:
         _switch["error"] = str(e)
-        if prev and prev != name:                  # best effort: bring the previous model back
+        if restore_prev and prev and prev != name:  # best effort: bring the previous model back
             try:
                 await http.post(f"{VLM}/models/load", json={"model": prev}, timeout=30.0)
             except Exception:
                 pass
     finally:
         state["model"]["switching"] = None
+
+
+# ---------------------------------------------------------------- safeguards
+def default_model():
+    pre = load_presets()
+    if DEFAULT_MODEL in pre:
+        return DEFAULT_MODEL
+    return (next((n for n, p in pre.items() if p["startup"] and not p["missing"]), None)
+            or next((n for n, p in pre.items() if not p["missing"]), None))
+
+
+async def guard_switch(name, why):
+    print(f"guard: {why}", flush=True)
+    state["model"]["guard"] = {"t": time.time(), "msg": why}
+    await do_switch(name, restore_prev=False)
+    if _switch["error"]:
+        print(f"guard: loading {name} failed: {_switch['error']}", flush=True)
+        state["model"]["guard"]["msg"] = why + f" Loading it failed: {_switch['error']}"
+
+
+async def guard_sampler():
+    """Keeps the demo answering without an operator:
+    1. no model loaded (its process was killed, or a load failed): load the default model again;
+    2. a bigger model is loaded and free RAM + free swap are nearly gone: replace it by the default model before the
+       kernel's OOM killer acts (which also stalls Frigate's detectors, see NOTES.md step 8)."""
+    await asyncio.sleep(30)                           # the router loads its startup model first
+    none_since = low_since = None
+    while True:
+        await asyncio.sleep(2.0)
+        try:
+            m = state["model"]
+            mi = meminfo()
+            headroom = (mi["MemAvailable"] + mi.get("SwapFree", 0)) / 2**30
+            m["headroom_gib"] = round(headroom, 1)
+            if m.get("switching") or not m.get("router_up"):
+                none_since = low_since = None
+                continue
+            now, act, dflt = time.time(), m.get("active"), default_model()
+            if act or m.get("loading") or not dflt or not GUARD_NO_MODEL_S:
+                none_since = None
+            else:
+                none_since = none_since or now
+                if now - none_since >= GUARD_NO_MODEL_S:
+                    none_since = None
+                    await guard_switch(dflt, f"No language model was loaded for {GUARD_NO_MODEL_S:.0f} s, "
+                                             f"so {dflt} was loaded again.")
+                    continue
+            if not GUARD_MIN_HEADROOM_GIB or not act or not dflt or act == dflt or headroom >= GUARD_MIN_HEADROOM_GIB:
+                low_since = None
+            else:
+                low_since = low_since or now
+                if now - low_since >= GUARD_LOW_MEM_S:
+                    low_since = None
+                    await guard_switch(dflt, f"Memory was running out with {act} loaded ({headroom:.1f} GiB of RAM "
+                                             f"and swap left), so it was replaced by {dflt}.")
+        except Exception as e:
+            print(f"guard: {e!r}", flush=True)
 
 
 def med(v):

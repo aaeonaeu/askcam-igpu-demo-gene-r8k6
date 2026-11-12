@@ -99,6 +99,15 @@ services:
       # 0.18.2: remove both lines if FRIGATE_IMAGE points to any other version.
       - ./frigate/patches/maintainer.py:/opt/frigate/frigate/embeddings/maintainer.py:ro
       - ./frigate/patches/object_descriptions.py:/opt/frigate/frigate/data_processing/post/object_descriptions.py:ro
+      - ./frigate/stall-check.py:/usr/local/bin/askcam-stall-check.py:ro
+    healthcheck:
+      # Frigate's own check (the API answers) plus frigate/stall-check.py, which restarts Frigate when the cameras
+      # deliver frames but none are processed for 2 minutes (NOTES.md step 8).
+      test: ["CMD-SHELL", "test -f /dev/shm/.frigate-is-stopping && exit 0; curl --fail --silent --show-error -o /dev/null http://127.0.0.1:5000/api/version && python3 /usr/local/bin/askcam-stall-check.py"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
     tmpfs:
       - /tmp/cache:size=1g
     ports:
@@ -117,6 +126,9 @@ services:
       vlm:
         condition: service_healthy
     environment:
+      # safeguards: reload the default model when none is loaded; go back to it when RAM + swap run out (0 = off)
+      - GUARD_NO_MODEL_S=${GUARD_NO_MODEL_S:-60}
+      - GUARD_MIN_HEADROOM_GIB=${GUARD_MIN_HEADROOM_GIB:-1.5}
       - FRIGATE_URL=http://frigate:5000
       # questions go straight to the VLM; only Frigate's GenAI goes through vlm-gate
       - VLM_URL=http://vlm:8080

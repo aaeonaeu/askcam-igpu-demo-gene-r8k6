@@ -41,6 +41,8 @@ header{display:flex;align-items:center;gap:24px}
 .note{color:var(--muted);font-size:16px;margin-top:10px}
 .banner{background:#2a2110;border:2px solid var(--gpu);color:var(--gpu);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:20px}
 .banner.err{background:#2a1313;border-color:var(--warn);color:var(--warn)}
+#guard{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:60;max-width:70vw;cursor:pointer}
+#guard .banner{margin:0;box-shadow:0 6px 24px #000a}
 .closeb{float:right;background:#18263a;color:var(--text);border:2px solid var(--line);border-radius:10px;padding:6px 16px;font:inherit;cursor:pointer}
 .tab{background:var(--panel);color:var(--text);border:2px solid var(--line);border-radius:12px;
   padding:8px 20px;font:inherit;font-weight:600;cursor:pointer}
@@ -116,6 +118,7 @@ footer b{color:var(--text)}
   <div class="tabs" id="tabs" role="tablist"></div>
   <button class="modelbtn" id="modelbtn" type="button">Model: <span id="modelname">…</span> ▾</button>
 </header>
+<div id="guard" title="Click to dismiss"></div>
 
 <div id="modal" role="dialog" aria-label="Choose the language model">
   <div class="sheet">
@@ -309,7 +312,13 @@ function renderModelChip(m) {
   $("modelname").innerHTML = sw ? `loading ${esc(nice(sw))}…` : modelState.active ? esc(nice(modelState.active)) : (modelState.router_up === false ? "not reachable" : "none loaded");
   $("modelbtn").classList.toggle("busy", !!sw);
   setBusy(asking || !!sw || !modelState.active);
+  // notice from the backend's safeguards (model reloaded / replaced), shown for an hour or until clicked
+  const g = modelState.guard, show = g && g.t > guardDismissed && Date.now() / 1000 - g.t < 3600;
+  const html = show ? `<div class="banner">${new Date(g.t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})} · ${esc(g.msg)}</div>` : "";
+  if ($("guard").innerHTML !== html) $("guard").innerHTML = html;
+  $("guard").onclick = () => { guardDismissed = g ? g.t : 0; $("guard").innerHTML = ""; };
 }
+let guardDismissed = 0;
 
 // ---------- meters
 const hist = {};

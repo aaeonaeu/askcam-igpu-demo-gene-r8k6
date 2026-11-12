@@ -302,3 +302,22 @@ Recommendation for the booth: keep **qwen2.5-vl-3b** as the default; use the **7
   - The process now handles every update instead of a third of them and used about half a CPU core on average (no "before" figure was recorded).
 - **Kept:** the 5 GB container limit, as a backstop only.
 - **Limits:** the patch files are full copies of two Frigate 0.18.2 files, so they must be dropped or redone when the Frigate image changes. Upstream's `dev` branch still has the one-update-per-loop structure (read from source, not run). Not reported upstream yet. The offline package `askcam-demo-20261111.tar.zst` was built before this fix.
+
+## Step 8: overnight failure with the 7B model, and three safeguards (2026-11-12)
+
+- **What happened** (evidence in `logs/incident-20261112/`, not in git; times CET):
+  - Nov 11 15:32 the model was switched to `qwen2.5-vl-7b` from the UI and left loaded.
+  - 19:34 and 23:21: host-wide OOM, the kernel killed the 7B's `llama-server` (at the first kill: 3.6 GiB RSS + 3.3 GiB swap, swap full, `gpu_active` 8.2 GiB). About 4 h of running each time. Not determined: whether its memory grows over time or it simply has no headroom.
+  - After the second kill no model was loaded until someone loaded the 3B at 10:35 next day. Normally a killed model is respawned at once by the router, because askcam-ui's 5 Hz metrics poll still names it for up to 1 s; that evidently did not happen while the box was thrashing.
+  - 23:19-23:22: Frigate's watchdog found detection stuck (memory pressure) and force-killed the detector processes. The replacements then idled forever: both timed out every second on the same process-shared futex and never read their queue (`strace`, `detector-strace.txt`). `DetectorRunner` does `detection_queue.get(timeout=1)`; a SIGKILLed process that held the queue's reader lock leaves it locked. That last link is inferred from the code, not observed directly.
+  - Result until 10:53 next day: `process_fps` 0.1 and `skipped_fps` 4.0 on every camera, no descriptions, yet all containers "healthy". `docker compose restart frigate` fixed it.
+  - The step 7 leak fix was not involved: same embeddings process for 23 h at 0.36 GiB.
+- **Safeguards added:**
+  1. *Model auto-reload* (`askcam-ui/app.py`, `guard_sampler`): no model loaded or loading for `GUARD_NO_MODEL_S` (60 s) -> load the default model (the `load-on-startup` preset, or `DEFAULT_MODEL`).
+  2. *Low-memory fallback* (same task): a non-default model is loaded and MemAvailable + SwapFree stay below `GUARD_MIN_HEADROOM_GIB` (1.5) for 20 s -> replace it by the default model. The page shows a notice for an hour (click to dismiss); `docker logs askcam-ui | grep guard:` keeps the history.
+  3. *Frigate stall restart* (`frigate/stall-check.py`, run by the container health check): all cameras that deliver frames process < 0.5 fps for 120 s (`ASKCAM_STALL_RESTART_S`) -> halt Frigate's s6 tree; Docker's restart policy starts it again.
+- **Tested:**
+  1. UI started with no model loaded: stayed empty for 90 s (30 s start delay + 60 s), then the guard loaded the 3B; first word 3.0 s afterwards. Killing the model process with `kill -9` did not exercise the guard: the router respawned it within 0.2 s as described above.
+  2. With the threshold forced to 99 GiB and `qwen2.5-vl-3b-lite` loaded, the guard replaced it by the 3B after 20 s. **Not tested under real memory pressure** (would mean driving the box into swap with the 7B again); whether 1.5 GiB / 20 s is early enough is therefore unproven.
+  3. Both detector processes frozen with SIGSTOP: stall reported after ~100 s (unhealthy), restart triggered at 121 s, container back 3 min 47 s after the freeze (Frigate's shutdown waits 30 s for each frozen detector), then 4 fps processed, 0 skipped, detector 7.8 ms.
+- **Advice unchanged:** the 7B is for short comparisons only on this 14.4 GiB machine.
