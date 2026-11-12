@@ -92,6 +92,8 @@ services:
       - TZ=Europe/Rome
       # VA-API driver for the iGPU video decode engine
       - LIBVA_DRIVER_NAME=radeonsi
+      # frigate/stall-check.py: restart Frigate after this many seconds without processed frames (0 = only report)
+      - ASKCAM_STALL_RESTART_S=${ASKCAM_STALL_RESTART_S:-120}
     volumes:
       - ./frigate/config:/config
       - ./frigate/media:/media/frigate
